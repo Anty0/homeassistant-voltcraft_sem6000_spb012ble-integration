@@ -1,0 +1,10 @@
+# Development dependencies for linting, formatting, and type checking
+
+ruff~=0.14.6
+mypy~=1.18.2
+
+# Runtime dependencies (needed for type checking and IDE)
+homeassistant~=2025.11.3
+bleak~=2.0.0
+bleak-retry-connector~=4.4.4
+types-requests
