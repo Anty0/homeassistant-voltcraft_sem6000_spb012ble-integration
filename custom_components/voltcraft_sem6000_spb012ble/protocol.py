@@ -13,7 +13,6 @@ Payload structure:
 - 0xFF * 2          : ? (part of the checksum??)
 """
 
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -24,17 +23,13 @@ class Command(IntEnum):
     SWITCH = 0x03
     MEASURE = 0x04
 
-    def build_payload(
-            self,
-            params: bytearray | None = None
-    ) -> bytearray:
+    def build_payload(self, params: bytearray | None = None) -> bytearray:
         if params is None:
             params = bytearray()
 
         length = len(params) + 3
         checksum = (1 + sum(list(params)) + self) % 256
-        return bytearray([0x0F, length, self, 0x00]) + \
-            params + bytearray([checksum, 0xFF, 0xFF])
+        return bytearray([0x0F, length, self, 0x00]) + params + bytearray([checksum, 0xFF, 0xFF])
 
 
 class SwitchModes(IntEnum):
@@ -48,13 +43,12 @@ class SwitchModes(IntEnum):
 class NotifyPayload:
     @staticmethod
     def from_payload(payload: bytearray) -> ParsedNotifyPayload | None:
-
         if payload[0] != 0x0F:
             # Not a valid payload
             return None
 
         length = payload[1]
-        body = payload[2:length+2]
+        body = payload[2 : length + 2]
 
         params = body[0:-1]
 
@@ -103,7 +97,6 @@ class MeasureNotifyPayload(NotifyPayload):
 
 @dataclass(frozen=True)
 class SwitchNotifyPayload(NotifyPayload):
-
     @staticmethod
     def from_data(data: bytearray) -> SwitchNotifyPayload:
         return SwitchNotifyPayload()

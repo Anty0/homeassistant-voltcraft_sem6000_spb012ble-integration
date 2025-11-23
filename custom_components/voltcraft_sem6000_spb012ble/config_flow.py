@@ -19,7 +19,7 @@ from .const import DOMAIN, DEVICE_NAME, SERVICE_UUID
 _LOGGER = logging.getLogger(__name__)
 
 
-class MainConfigFlow(ConfigFlow, domain=DOMAIN):
+class MainConfigFlow(ConfigFlow, domain=DOMAIN):  # type: ignore[call-arg]
     VERSION = 1
 
     def __init__(self) -> None:
@@ -27,9 +27,7 @@ class MainConfigFlow(ConfigFlow, domain=DOMAIN):
         self._discovered_devices: dict[str, str] = {}
         self._mac_address: str | None = None
 
-    async def async_step_bluetooth(
-        self, discovery_info: BluetoothServiceInfoBleak
-    ) -> ConfigFlowResult:
+    async def async_step_bluetooth(self, discovery_info: BluetoothServiceInfoBleak) -> ConfigFlowResult:
         device_unique_id = format_mac(discovery_info.address)
         await self.async_set_unique_id(device_unique_id)
         self._abort_if_unique_id_configured()
@@ -37,9 +35,7 @@ class MainConfigFlow(ConfigFlow, domain=DOMAIN):
         self._name = discovery_info.name
         return await self.async_step_confirm()
 
-    async def async_step_confirm(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_confirm(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         if user_input is not None or not onboarding.async_is_onboarded(self.hass):
             return self._create_entry()
 
@@ -49,9 +45,7 @@ class MainConfigFlow(ConfigFlow, domain=DOMAIN):
             description_placeholders={"name": self._name},
         )
 
-    async def async_step_user(
-            self, user_input: dict[str, Any] | None = None
-        ) -> ConfigFlowResult:
+    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         if user_input is not None:
             mac_address = user_input[CONF_MAC]
             device_unique_id = format_mac(mac_address)

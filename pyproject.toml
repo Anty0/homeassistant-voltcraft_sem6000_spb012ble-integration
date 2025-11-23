@@ -24,5 +24,6 @@ module = [
     "bleak.*",
     "bleak_retry_connector.*",
     "voluptuous.*",
+    "homeassistant.*",
 ]
 ignore_missing_imports = true

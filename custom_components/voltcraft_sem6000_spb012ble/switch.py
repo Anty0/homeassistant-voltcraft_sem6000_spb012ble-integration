@@ -35,7 +35,7 @@ async def async_setup_entry(
         entry.entry_id,
     )
 
-    switch = MainSwitchEntity(hass, mac_address, client)
+    switch = MainSwitchEntity(hass, mac_address, ble_device.name, client)
     await switch.async_setup()
     async_add_entities([switch])
 
@@ -45,19 +45,19 @@ class MainSwitchEntity(SwitchEntity):
     _attr_should_poll = False  # local_push
     _attr_has_entity_name = True
 
-    def __init__(self, hass: HomeAssistant, mac: str, client: BleakClient) -> None:
+    def __init__(self, hass: HomeAssistant, mac: str, device_name: str, client: BleakClient) -> None:
         self.hass: HomeAssistant = hass
         self.mac: str = mac
         self.client: BleakClient = client
 
         self._attr_unique_id = format_mac(self.mac)
-        self._attr_name = self.client.name or DEVICE_NAME
+        self._attr_name = device_name or DEVICE_NAME
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, self.unique_id)},
             name=self.name,
         )
 
-        self._attr_is_on = None  # Unknown at first
+        self._attr_is_on: bool | None = None  # Unknown at first
         self._attr_available = True
 
     async def async_setup(self) -> None:
@@ -83,13 +83,13 @@ class MainSwitchEntity(SwitchEntity):
     async def async_turn_off(self, **kwargs: Any) -> None:
         await self._send_command(SwitchModes.OFF.build_payload())
 
-    async def async_measure(self):
+    async def async_measure(self) -> None:
         await self._send_command(Command.MEASURE.build_payload())
 
-    async def _send_command(self, payload: bytearray):
+    async def _send_command(self, payload: bytearray) -> None:
         await self.client.write_gatt_char(COMMAND_UUID, payload)
 
-    async def _handle_notify(self, sender, data: bytearray):
+    async def _handle_notify(self, sender: Any, data: bytearray) -> None:
         payload = NotifyPayload.from_payload(data)
         match payload:
             case MeasureNotifyPayload():
