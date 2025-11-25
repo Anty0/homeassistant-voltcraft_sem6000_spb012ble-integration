@@ -19,7 +19,7 @@ from .const import DOMAIN, DEVICE_NAME, SERVICE_UUID
 _LOGGER = logging.getLogger(__name__)
 
 
-class MainConfigFlow(ConfigFlow, domain=DOMAIN):  # type: ignore[call-arg]
+class MainConfigFlow(ConfigFlow, domain=DOMAIN):
     VERSION = 1
 
     def __init__(self) -> None:

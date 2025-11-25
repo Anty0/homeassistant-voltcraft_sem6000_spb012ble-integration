@@ -10,7 +10,7 @@ from homeassistant.const import CONF_MAC
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.device_registry import format_mac, DeviceInfo
+from homeassistant.helpers.device_registry import format_mac, DeviceInfo, CONNECTION_BLUETOOTH
 
 from .const import DOMAIN, DEVICE_NAME, COMMAND_UUID, NOTIFY_UUID
 from .protocol import Command, SwitchModes, NotifyPayload, SwitchNotifyPayload, MeasureNotifyPayload
@@ -45,15 +45,16 @@ class MainSwitchEntity(SwitchEntity):
     _attr_should_poll = False  # local_push
     _attr_has_entity_name = True
 
-    def __init__(self, mac: str, device_name: str, client: BleakClient) -> None:
+    def __init__(self, mac: str, device_name: str | None, client: BleakClient) -> None:
         self.mac: str = mac
         self.client: BleakClient = client
 
         self._attr_unique_id = format_mac(self.mac)
         self._attr_name = device_name or DEVICE_NAME
         self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, self.unique_id)},
-            name=self.name,
+            connections={(CONNECTION_BLUETOOTH, self.mac)},
+            identifiers={(DOMAIN, self.mac)},
+            name=device_name or DEVICE_NAME,
         )
 
         self._attr_is_on: bool | None = None  # Unknown at first
