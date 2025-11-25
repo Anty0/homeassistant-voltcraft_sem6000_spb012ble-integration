@@ -65,7 +65,7 @@ class MainConfigFlow(ConfigFlow, domain=DOMAIN):  # type: ignore[call-arg]
                 continue
 
             if SERVICE_UUID in discovery_info.service_uuids:
-                self._discovered_devices[address] = discovery_info.name
+                self._discovered_devices[address] = f"{discovery_info.name} ({address})"
 
         if not self._discovered_devices:
             return self.async_abort(reason="no_devices_found")
