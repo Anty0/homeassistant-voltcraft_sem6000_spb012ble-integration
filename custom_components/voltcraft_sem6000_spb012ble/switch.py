@@ -35,7 +35,7 @@ async def async_setup_entry(
         entry.entry_id,
     )
 
-    switch = MainSwitchEntity(hass, mac_address, ble_device.name, client)
+    switch = MainSwitchEntity(mac_address, ble_device.name, client)
     await switch.async_setup()
     async_add_entities([switch])
 
@@ -45,8 +45,7 @@ class MainSwitchEntity(SwitchEntity):
     _attr_should_poll = False  # local_push
     _attr_has_entity_name = True
 
-    def __init__(self, hass: HomeAssistant, mac: str, device_name: str, client: BleakClient) -> None:
-        self.hass: HomeAssistant = hass
+    def __init__(self, mac: str, device_name: str, client: BleakClient) -> None:
         self.mac: str = mac
         self.client: BleakClient = client
 
@@ -58,6 +57,7 @@ class MainSwitchEntity(SwitchEntity):
         )
 
         self._attr_is_on: bool | None = None  # Unknown at first
+        self._attr_is_on_next: bool | None = None
         self._attr_available = True
 
     async def async_setup(self) -> None:
@@ -78,9 +78,13 @@ class MainSwitchEntity(SwitchEntity):
         await self.async_measure()
 
     async def async_turn_on(self, **kwargs: Any) -> None:
+        self._warn_about_missing_notify()
+        self._attr_is_on_next = True
         await self._send_command(SwitchModes.ON.build_payload())
 
     async def async_turn_off(self, **kwargs: Any) -> None:
+        self._warn_about_missing_notify()
+        self._attr_is_on_next = False
         await self._send_command(SwitchModes.OFF.build_payload())
 
     async def async_measure(self) -> None:
@@ -96,12 +100,18 @@ class MainSwitchEntity(SwitchEntity):
                 self._attr_is_on = payload.is_on
                 self.schedule_update_ha_state()
             case SwitchNotifyPayload():
-                if self._attr_is_on is not None:
-                    self._attr_is_on = True
-                    self.schedule_update_ha_state()
-                else:
-                    _LOGGER.warning("Received SwitchNotifyPayload, but we don't know if the switch is on yet")
+                self._attr_is_on = self._attr_is_on_next
+                self._attr_is_on_next = None
+                self.schedule_update_ha_state()
+
+                if self._attr_is_on is None:
+                    _LOGGER.warning("Lost track of switch state, requesting initial update")
                     # Retry sending an initial update request
                     self.hass.create_task(self.async_measure())
             case None:
                 _LOGGER.warning("Unknow payload received: %s", data.hex())
+
+    def _warn_about_missing_notify(self) -> None:
+        if self._attr_is_on_next is None:
+            return
+        _LOGGER.warning("Didn't receive confirmation of last command. Switch state may get out of sync.")
