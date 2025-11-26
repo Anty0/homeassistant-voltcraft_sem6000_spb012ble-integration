@@ -43,14 +43,13 @@ async def async_setup_entry(
 class MainSwitchEntity(SwitchEntity):
     _attr_device_class = SwitchDeviceClass.OUTLET
     _attr_should_poll = False  # local_push
-    _attr_has_entity_name = True
 
     def __init__(self, mac: str, device_name: str | None, client: BleakClient) -> None:
-        self.mac: str = mac
+        self.mac: str = format_mac(mac)
         self.client: BleakClient = client
 
-        self._attr_unique_id = format_mac(self.mac)
-        self._attr_name = device_name or DEVICE_NAME
+        self._attr_unique_id = self.mac
+        self._attr_name = "Power"
         self._attr_device_info = DeviceInfo(
             connections={(CONNECTION_BLUETOOTH, self.mac)},
             identifiers={(DOMAIN, self.mac)},
