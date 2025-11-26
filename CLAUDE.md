@@ -4,29 +4,48 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a Home Assistant custom component integration for Voltcraft SEM6000 / SPB012BLE Bluetooth Low Energy (BLE) smart power plugs. The integration enables local control of these devices via Bluetooth, allowing users to turn the outlet on/off and monitor its state.
+This is a Home Assistant custom component integration for Voltcraft SEM6000 / SPB012BLE Bluetooth Low Energy (BLE) smart power plugs. The integration enables local control of these devices via Bluetooth, allowing users to turn the outlet on/off, monitor its state, and track real-time power measurements (power, voltage, current, frequency, power factor, and total energy consumption). The integration uses a DataUpdateCoordinator pattern to poll the device every 5 seconds for sensor updates.
 
 ## Repository Structure
 
 ```
 custom_components/voltcraft_sem6000_spb012ble/
-├── __init__.py          # Integration setup and platform loading
+├── __init__.py          # Integration setup, creates coordinator and loads platforms
 ├── config_flow.py       # Configuration flow for device discovery
-├── const.py             # Constants (domain, UUIDs, device names)
+├── const.py             # Constants (domain, UUIDs, device names, polling interval)
+├── coordinator.py       # DataUpdateCoordinator for BLE communication and polling
 ├── manifest.json        # Integration metadata and dependencies
 ├── protocol.py          # BLE protocol implementation (reverse-engineered)
+├── sensor.py            # Sensor entity implementations (6 sensors)
 ├── strings.json         # UI strings for configuration
-└── switch.py            # Switch entity implementation
+└── switch.py            # Switch entity implementation (uses coordinator)
 ```
 
 ## Architecture
 
+### DataUpdateCoordinator Pattern
+
+The integration uses Home Assistant's `DataUpdateCoordinator` pattern for centralized BLE communication:
+
+1. **Coordinator** (`coordinator.py`): `VoltcraftDataUpdateCoordinator`
+   - Owns the BLE connection (established via `bleak-retry-connector`)
+   - Registers persistent notification handler on `NOTIFY_UUID`
+   - Polls device every 5 seconds by sending MEASURE command
+   - Processes ALL notifications (solicited and unsolicited) asynchronously
+   - Distributes measurement data to all entities atomically
+
+2. **Entities**: Switch and 6 sensor entities extend `CoordinatorEntity`
+   - Subscribe to coordinator updates
+   - Automatically marked unavailable if coordinator fails
+   - Get state from `coordinator.data`
+
 ### BLE Communication Flow
 
-1. **Discovery**: Bluetooth devices are discovered via Home Assistant's bluetooth integration using the service UUID `0000fff0-0000-1000-8000-00805f9b34fb`
-2. **Connection**: BLE connection established using `bleak-retry-connector`
-3. **Commands**: Commands sent via GATT characteristic `COMMAND_UUID` (0xfff3)
-4. **Notifications**: Device state updates received via `NOTIFY_UUID` (0xfff4)
+1. **Discovery**: Bluetooth devices discovered via Home Assistant's bluetooth integration using service UUID `0000fff0-0000-1000-8000-00805f9b34fb`
+2. **Connection**: BLE connection established in `__init__.py` using `bleak-retry-connector`
+3. **Commands**: Sent via GATT characteristic `COMMAND_UUID` (0xfff3)
+4. **Notifications**: Received via `NOTIFY_UUID` (0xfff4)
+5. **Polling**: Coordinator sends MEASURE command every 5 seconds, device responds via notification
 
 ### Protocol Details (protocol.py)
 
@@ -35,23 +54,31 @@ The BLE protocol was reverse-engineered by monitoring Android app communication.
 - Length byte
 - Command byte (SWITCH=0x03, MEASURE=0x04)
 - Params
-- Checksum
+- Checksum (validation disabled - checksums from device appear incorrect)
 - Footer: `0xFF 0xFF`
 
 Commands are built using `Command.build_payload()` and responses parsed via `NotifyPayload.from_payload()`. Two notification types:
-- `MeasureNotifyPayload`: Contains device state (is_on) and measurement data (power, voltage, etc. - commented out but available)
+- `MeasureNotifyPayload`: Contains device state (is_on) and measurement data (power, voltage, current, frequency, power_factor, consumed_energy)
 - `SwitchNotifyPayload`: Confirms switch state change
 
-### Entity Implementation (switch.py)
+**Unit conversions** in `VoltcraftData.from_payload()`:
+- Power: milliwatts → watts (÷1000)
+- Current: milliamps → amps (÷1000)
+- Power factor: 0-256 → 0.0-1.0 (÷256)
+- Voltage, frequency, consumed_energy: no conversion
 
-`MainSwitchEntity` extends Home Assistant's `SwitchEntity`:
-- **Device class**: OUTLET
-- **IoT class**: local_push (no polling)
-- **Setup**: Registers notification handler on NOTIFY_UUID
-- **State management**: State tracked via `_attr_is_on`, updated through notification callbacks
-- **Commands**: Turn on/off via `SwitchModes.ON/OFF.build_payload()`
+### Entity Implementations
 
-Initial state request (`async_measure()`) sent when entity is added to Home Assistant.
+**Switch Entity** (`switch.py`): `MainSwitchEntity` extends `CoordinatorEntity` and `SwitchEntity`
+- Device class: OUTLET
+- State from `coordinator.data.is_on` with optimistic updates (`_attr_is_on_next`)
+- Commands sent via `coordinator.async_send_switch_command()`
+- Triggers coordinator refresh after switch commands
+
+**Sensor Entities** (`sensor.py`): Six sensor classes extend `CoordinatorEntity` and `SensorEntity`
+- Power, Voltage, Current, Frequency, Power Factor, Total Energy
+- Values from `coordinator.data` properties
+- State classes: MEASUREMENT (5 sensors) and TOTAL_INCREASING (energy)
 
 ### Configuration Flow (config_flow.py)
 
@@ -126,36 +153,31 @@ All three checks must pass before code can be merged.
 ## Key Implementation Notes
 
 ### BLE Connection Management
-- Connection established in `switch.py:async_setup_entry()` using `establish_connection()`
-- Connection lifecycle managed by entity:
-  - Notifications started in `async_setup()`
-  - Cleanup in `async_will_remove_from_hass()`: stop notifications and disconnect client
+- Connection established in `__init__.py:async_setup_entry()` using `establish_connection()`
+- Connection owned by coordinator, not individual entities
+- Coordinator lifecycle:
+  - `async_setup()`: Start notifications on NOTIFY_UUID
+  - `async_shutdown()`: Stop notifications and disconnect client
+  - Called from `__init__.py` setup/unload
 
-### State Synchronization
-- Device doesn't report state changes proactively on switch
-- Integration sends `MEASURE` command to poll current state
-- `SwitchNotifyPayload` handling includes fallback to request measure if state unknown
+### State Synchronization and Polling
+- Device polled every 5 seconds via coordinator's `_async_update_data()`
+- Coordinator sends MEASURE command asynchronously
+- Notification handler processes responses and updates all entities via `async_set_updated_data()`
+- Handles both solicited (from polling) and unsolicited notifications (manual switch press)
+
+### Notification Handling
+- Single persistent notification handler in coordinator
+- Processes `MeasureNotifyPayload` → updates all entities
+- Processes `SwitchNotifyPayload` → triggers immediate measure request
+- Unknown payloads logged as warnings with hex dump
 
 ### Error Handling
-- Unknown payloads logged as warnings with hex dump for debugging
-- Checksum validation commented out in protocol.py (checksums from device appear incorrect)
+- Coordinator raises `UpdateFailed` if no data available, marking all entities unavailable
+- BLE errors caught and logged
+- Checksum validation disabled in protocol.py (checksums from device appear incorrect)
 
 ## Extending the Integration
-
-### Adding Sensor Entities
-The protocol supports reading power metrics (commented out in `MeasureNotifyPayload`):
-- power (3 bytes)
-- voltage (1 byte)
-- current (2 bytes)
-- frequency (1 byte)
-- power_factor (2 bytes)
-- consumed_energy (4 bytes)
-
-To add sensors:
-1. Uncomment fields in `MeasureNotifyPayload.from_data()`
-2. Add `Platform.SENSOR` to `PLATFORMS` in `__init__.py`
-3. Create `sensor.py` implementing sensor entities
-4. Update `manifest.json` if needed
 
 ### Protocol Expansion
 Additional commands may exist (not reverse-engineered). To discover:

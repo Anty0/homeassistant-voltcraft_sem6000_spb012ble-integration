@@ -75,23 +75,23 @@ class NotifyPayload:
 @dataclass(frozen=True)
 class MeasureNotifyPayload(NotifyPayload):
     is_on: bool
-    # power: int
-    # voltage: int
-    # current: int
-    # frequency: int
-    # power_factor: int
-    # consumed_energy: int
+    power: int
+    voltage: int
+    current: int
+    frequency: int
+    power_factor: int
+    consumed_energy: int
 
     @staticmethod
     def from_data(data: bytearray) -> MeasureNotifyPayload:
         return MeasureNotifyPayload(
             is_on=bool(data[0]),
-            # power=int.from_bytes(data[1:4]),
-            # voltage=int(data[4]),
-            # current=int.from_bytes(data[5:7]),
-            # frequency=int(data[7]),
-            # power_factor=int.from_bytes(data[8:10]),
-            # consumed_energy=int.from_bytes(data[10:14])
+            power=int.from_bytes(data[1:4], byteorder="big"),
+            voltage=int(data[4]),
+            current=int.from_bytes(data[5:7], byteorder="big"),
+            frequency=int(data[7]),
+            power_factor=int.from_bytes(data[8:10], byteorder="big"),
+            consumed_energy=int.from_bytes(data[10:14], byteorder="big"),
         )
 
 

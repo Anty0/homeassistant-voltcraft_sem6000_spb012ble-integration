@@ -9,18 +9,17 @@ A Home Assistant custom component integration for **Voltcraft SEM6000** and **SP
 - Turn outlet on/off
 - Monitor outlet state (on/off)
 - Automatic Discovery
+- Real-time sensor monitoring (updated every 5 seconds):
+  - Power consumption (Watts)
+  - Voltage (Volts)
+  - Current (Amperes)
+  - Frequency (Hz)
+  - Power factor (0.0-1.0)
+  - Total consumed energy (kWh)
 
 ## Missing Capabilities
 
-The device protocol supports additional sensor data that could be exposed in future versions:
-- Power consumption (Watts)
-- Voltage (Volts)
-- Current (Amperes)
-- Frequency (Hz)
-- Power factor
-- Consumed energy (kWh)
-
-The device also supports additional features (commands), which I don't plan to support (but PRs are welcome!):
+The device supports additional features (commands), which I don't plan to support (but PRs are welcome!):
 - Time sync (needed for scheduled power on/off)
 - Schedule power on/off (use Home Assistant automations instead)
 - Get/set device name
@@ -89,11 +88,11 @@ If the device is found, it will appear in the integration list under **Devices &
 
 ## Entities
 
-Once configured, the integration creates the following entity:
+Once configured, the integration creates the following entities:
 
 ### Switch Entity
 
-- **Entity ID**: `switch.[device_mac_address]` or `switch.[device_mac_address]`
+- **Entity ID**: `switch.[device_mac_address]`
 - **Device Class**: Outlet
 - **Attributes**:
   - `is_on`: Current state of the outlet (true/false)
@@ -101,6 +100,40 @@ Once configured, the integration creates the following entity:
   - `switch.turn_on`: Turn the outlet on
   - `switch.turn_off`: Turn the outlet off
   - `switch.toggle`: Toggle the outlet state
+
+### Sensor Entities
+
+All sensor values are updated every 5 seconds:
+
+- **Power** (`sensor.[device_mac_address]_power`)
+  - Current power consumption in Watts (W)
+  - Device Class: Power
+  - State Class: Measurement
+
+- **Voltage** (`sensor.[device_mac_address]_voltage`)
+  - Line voltage in Volts (V)
+  - Device Class: Voltage
+  - State Class: Measurement
+
+- **Current** (`sensor.[device_mac_address]_current`)
+  - Current draw in Amperes (A)
+  - Device Class: Current
+  - State Class: Measurement
+
+- **Frequency** (`sensor.[device_mac_address]_frequency`)
+  - Line frequency in Hertz (Hz)
+  - Device Class: Frequency
+  - State Class: Measurement
+
+- **Power Factor** (`sensor.[device_mac_address]_power_factor`)
+  - Power factor (0.0-1.0, dimensionless)
+  - Device Class: Power Factor
+  - State Class: Measurement
+
+- **Total Energy** (`sensor.[device_mac_address]_energy`)
+  - Cumulative energy consumption in kilowatt-hours (kWh)
+  - Device Class: Energy
+  - State Class: Total Increasing
 
 ## Enable Debug Logging
 
