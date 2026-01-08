@@ -32,7 +32,7 @@ class VoltcraftData:
     voltage: float  # Volts
     current: float  # Amps (converted from mA)
     frequency: int  # Hz
-    power_factor: float  # 0.0 - 1.0
+    power_factor: float | None  # 0.0 - 1.0
     consumed_energy: float  # kWh
 
     @staticmethod
@@ -43,7 +43,9 @@ class VoltcraftData:
             voltage=float(payload.voltage),
             current=payload.current / 1000.0,  # mA to A
             frequency=payload.frequency,
-            power_factor=payload.power_factor / 256.0,  # 0-256 → 0.0-1.0
+            power_factor=(
+                payload.power_factor / 256.0 if payload.power_factor is not None else None
+            ),  # 0-256 → 0.0-1.0
             consumed_energy=float(payload.consumed_energy),
         )
 
