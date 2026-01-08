@@ -32,6 +32,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         client,
         mac_address,
         ble_device.name,
+        entry.entry_id,
     )
 
     # Setup coordinator (start notifications)

@@ -10,6 +10,8 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH, DeviceInfo
 from homeassistant.helpers.device_registry import format_mac
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.components import bluetooth
+from bleak_retry_connector import establish_connection
 
 from .const import COMMAND_UUID, DEVICE_NAME, DOMAIN, NOTIFY_UUID, SCAN_INTERVAL
 from .protocol import (
@@ -55,6 +57,7 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
         client: BleakClient,
         mac: str,
         device_name: str | None,
+        entry_id: str,
     ) -> None:
         super().__init__(
             hass,
@@ -65,7 +68,38 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
         self.client = client
         self.mac = format_mac(mac)
         self._device_name = device_name
+        self._entry_id = entry_id
         self._latest_data: VoltcraftData | None = None
+
+    async def _ensure_connected(self) -> None:
+        """Ensure the client is connected."""
+        if self.client.is_connected:
+            return
+
+        _LOGGER.debug(
+            "Device %s disconnected, trying to reconnect", self.mac
+        )
+
+        ble_device = bluetooth.async_ble_device_from_address(
+            self.hass, self.mac, connectable=True
+        )
+        if not ble_device:
+            raise UpdateFailed(f"Device {self.mac} not found")
+
+        self.client = await establish_connection(
+            BleakClient,
+            ble_device,
+            self.name,
+            self._entry_id,
+        )
+
+        _LOGGER.debug("Connected to %s", self.mac)
+
+        # Re-subscribe to notifications
+        try:
+             await self.client.start_notify(NOTIFY_UUID, self._handle_notify)
+        except BleakError as err:
+             raise UpdateFailed(f"Failed to start notifications: {err}") from err
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -97,9 +131,19 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
         """
 
         try:
+            await self._ensure_connected()
             await self.client.write_gatt_char(COMMAND_UUID, Command.MEASURE.build_payload())
         except BleakError as err:
-            raise UpdateFailed(f"Failed to send measure command: {err}") from err
+            # If we get a characteristic not found error or any other bleak error,
+            # try to reconnect once
+            _LOGGER.debug("Error during update, trying to reconnect: %s", err)
+            try:
+                # Force disconnect to clear state
+                await self.client.disconnect()
+                await self._ensure_connected()
+                await self.client.write_gatt_char(COMMAND_UUID, Command.MEASURE.build_payload())
+            except BleakError as retry_err:
+                 raise UpdateFailed(f"Failed to send measure command: {retry_err}") from retry_err
 
         return self._latest_data
 
