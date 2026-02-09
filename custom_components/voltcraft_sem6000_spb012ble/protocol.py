@@ -11,6 +11,17 @@ Payload structure:
 - 0xXX * (length-3) : Params
 - 0xXX * 1          : Checksum
 - 0xFF * 2          : ? (part of the checksum??)
+
+MEASURE notification layout:
+  Byte 0       : is_on (bool)
+  Bytes 1-3    : power (3 bytes, big-endian, milliwatts)
+  Byte 4       : voltage (1 byte, volts)
+  Bytes 5-6    : current (2 bytes, big-endian, milliamps)
+  Byte 7       : frequency (1 byte, Hz)
+  Bytes 8-9    : unknown padding (NOT power_factor)
+  Bytes 10+    : consumed_energy (big-endian, Wh)
+                 14-byte payload (hw v2): 4 bytes
+                 12-byte payload (hw v3): 2 bytes
 """
 
 from __future__ import annotations
@@ -79,19 +90,19 @@ class MeasureNotifyPayload(NotifyPayload):
     voltage: int
     current: int
     frequency: int
-    power_factor: int
     consumed_energy: int
 
     @staticmethod
     def from_data(data: bytearray) -> MeasureNotifyPayload:
+        # data[8:10] are unknown padding bytes — skip them
+        # consumed_energy starts at offset 10; length varies by hw version
         return MeasureNotifyPayload(
             is_on=bool(data[0]),
             power=int.from_bytes(data[1:4], byteorder="big"),
             voltage=int(data[4]),
             current=int.from_bytes(data[5:7], byteorder="big"),
             frequency=int(data[7]),
-            power_factor=int.from_bytes(data[8:10], byteorder="big"),
-            consumed_energy=int.from_bytes(data[10:14], byteorder="big"),
+            consumed_energy=int.from_bytes(data[10:], byteorder="big"),
         )
 
 

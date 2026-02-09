@@ -32,19 +32,31 @@ class VoltcraftData:
     voltage: float  # Volts
     current: float  # Amps (converted from mA)
     frequency: int  # Hz
-    power_factor: float  # 0.0 - 1.0
-    consumed_energy: float  # kWh
+    power_factor: float | None  # 0.0 - 1.0, calculated from P/(V*I)
+    consumed_energy: float  # kWh (converted from Wh)
 
     @staticmethod
     def from_payload(payload: MeasureNotifyPayload) -> VoltcraftData:
+        power = payload.power / 1000.0  # mW to W
+        voltage = float(payload.voltage)
+        current = payload.current / 1000.0  # mA to A
+
+        # Power factor - calculate from P / (V * I)
+        apparent_power = voltage * current
+        power_factor: float | None
+        if apparent_power > 0:
+            power_factor = min(power / apparent_power, 1.0)
+        else:
+            power_factor = None
+
         return VoltcraftData(
             is_on=payload.is_on,
-            power=payload.power / 1000.0,  # mW to W
-            voltage=float(payload.voltage),
-            current=payload.current / 1000.0,  # mA to A
+            power=power,
+            voltage=voltage,
+            current=current,
             frequency=payload.frequency,
-            power_factor=payload.power_factor / 256.0,  # 0-256 → 0.0-1.0
-            consumed_energy=float(payload.consumed_energy),
+            power_factor=power_factor,
+            consumed_energy=payload.consumed_energy / 1000.0,  # Wh to kWh
         )
 
 
@@ -105,6 +117,7 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
 
     async def _handle_notify(self, sender: BleakGATTCharacteristic, data: bytearray) -> None:
         """Handle notifications from the device."""
+        _LOGGER.debug("Received notification: %s", data.hex())
         payload = NotifyPayload.from_payload(data)
 
         match payload:
