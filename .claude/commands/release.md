@@ -1,5 +1,5 @@
 ---
-allowed-tools: Bash(grep:*), Bash(git describe:*), Bash(git branch:*), Bash(git log:*), Bash(git diff:*), Bash(git status:*), Bash(git tag:*), Bash(git add:*), Bash(git commit:*), Bash(git reset:*), Bash(gh repo view:*), Bash(gh run:*), Bash(gh run list:*), Bash(gh run watch:*), Bash(gh run rerun:*), Bash(gh release delete:*), Bash(gh release create:*), Edit, Read
+allowed-tools: Bash(grep:*), Bash(git describe:*), Bash(git branch:*), Bash(git log:*), Bash(git diff:*), Bash(git status:*), Bash(git tag:*), Bash(git add:*), Bash(git commit:*), Bash(git reset:*), Bash(gh repo view:*), Bash(gh run:*), Bash(gh run list:*), Bash(gh run watch:*), Bash(gh run rerun:*), Edit, Read
 description: Release a new version - bump version, commit, tag, push, create GitHub release
 argument-hint: "[major|minor|patch]"
 ---
@@ -45,9 +45,26 @@ Do all of the following in order:
 3. Tag: `git tag X.Y.Z`
 4. Push: `git push && git push --tags`
 
-### Step 4: Create GitHub release
+### Step 4: Wait for CI
 
-Create the release on GitHub. The title format is `X.Y.Z`. The body format is:
+After the commit and tag are pushed, watch GitHub Actions to make sure CI passes before creating the GitHub release:
+
+1. Wait a moment for workflows to trigger, then use `gh run list --limit 5` to find the runs triggered by the push
+2. Use `gh run watch <run-id>` to monitor each workflow run (there are three: lint, HACS validate, hassfest)
+
+If all checks pass, proceed to Step 5.
+
+If any check fails, explain what happened and recommend one of these recovery strategies:
+- **Flaky/random failure**: Rerun with `gh run rerun <run-id>`
+- **Real failure**: We need to scrap the release and fix the issue:
+  1. Delete the remote tag: `git push --delete origin X.Y.Z`
+  2. Delete the local tag: `git tag -d X.Y.Z`
+  3. Remove the release commit: `git reset --hard HEAD~1 && git push --force`
+  4. Fix the issue, then re-release with the same version
+
+### Step 5: Create GitHub release
+
+Only after all CI checks pass, create the release on GitHub. The title format is `X.Y.Z`. The body format is:
 
 ```
 Changes:
@@ -59,20 +76,4 @@ Changes:
 
 Use `gh release create` with `--title` and `--notes` flags. Pass the notes via a HEREDOC for correct formatting.
 
-### Step 5: Wait for CI
-
-After the release is pushed, watch GitHub Actions to make sure CI passes:
-
-1. Wait a moment for workflows to trigger, then use `gh run list --limit 5` to find the runs triggered by the push
-2. Use `gh run watch <run-id>` to monitor each workflow run (there are three: lint, HACS validate, hassfest)
-
-If all checks pass, report success with a link to the release.
-
-If any check fails, explain what happened and recommend one of these recovery strategies:
-- **Flaky/random failure**: Rerun with `gh run rerun <run-id>`
-- **Real failure**: We need to scrap the release and fix the issue:
-  1. Delete the GitHub release: `gh release delete X.Y.Z --yes`
-  2. Delete the remote tag: `git push --delete origin X.Y.Z`
-  3. Delete the local tag: `git tag -d X.Y.Z`
-  4. Remove the release commit: `git reset --hard HEAD~1 && git push --force`
-  5. Fix the issue, then re-release with the same version
+Report success with a link to the release.
