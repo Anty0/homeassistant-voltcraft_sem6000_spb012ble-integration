@@ -148,6 +148,7 @@ class VoltcraftEnergySensor(VoltcraftSensor):
     """Total energy consumption sensor."""
 
     _attr_device_class = SensorDeviceClass.ENERGY
+    _attr_entity_registry_enabled_default = False
     _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
     _attr_state_class = SensorStateClass.TOTAL_INCREASING
 
