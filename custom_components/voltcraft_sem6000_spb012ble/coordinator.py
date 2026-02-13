@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 
@@ -18,6 +19,7 @@ from .protocol import (
     NotifyPayload,
     SwitchModes,
     SwitchNotifyPayload,
+    LoginMode,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -89,6 +91,9 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
 
     async def async_setup(self) -> None:
         await self.client.start_notify(NOTIFY_UUID, self._handle_notify)
+        # login required for some firmware versions
+        await asyncio.sleep(2.0)
+        await self.client.write_gatt_char(COMMAND_UUID, LoginMode.build_payload())
 
     async def async_shutdown(self) -> None:
         try:
@@ -107,10 +112,24 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
         This sends a measure command and returns the latest data.
         The actual data update happens asynchronously via a notification handler.
         """
-
         try:
-            await self.client.write_gatt_char(COMMAND_UUID, Command.MEASURE.build_payload())
-        except BleakError as err:
+            # reconnect if connection was lost
+            if not self.client.is_connected:
+                await self.client.connect()
+                await self.client.start_notify(NOTIFY_UUID, self._handle_notify)
+                await self.client.write_gatt_char(COMMAND_UUID, LoginMode.build_payload())
+                self._latest_data = None
+
+            async with asyncio.timeout(5.0):
+                await self.client.write_gatt_char(COMMAND_UUID, Command.MEASURE.build_payload())
+                # wait for notification to be processed
+                await asyncio.sleep(0.5)
+        except Exception as err:
+            # force disconnect on error to ensure clean state for next poll
+            try:
+                await self.client.disconnect()
+            except:
+                pass
             raise UpdateFailed(f"Failed to send measure command: {err}") from err
 
         return self._latest_data
@@ -118,6 +137,11 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
     async def _handle_notify(self, sender: BleakGATTCharacteristic, data: bytearray) -> None:
         """Handle notifications from the device."""
         _LOGGER.debug("Received notification: %s", data.hex())
+        
+        # ignore login confirmation payloads
+        if len(data) > 2 and data[2] == Command.LOGIN:
+            return
+
         payload = NotifyPayload.from_payload(data)
 
         match payload:
