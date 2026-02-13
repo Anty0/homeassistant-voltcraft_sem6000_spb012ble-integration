@@ -33,6 +33,7 @@ from enum import IntEnum
 class Command(IntEnum):
     SWITCH = 0x03
     MEASURE = 0x04
+    LOGIN = 0x17
 
     def build_payload(self, params: bytearray | None = None) -> bytearray:
         if params is None:
@@ -114,3 +115,12 @@ class SwitchNotifyPayload(NotifyPayload):
 
 
 ParsedNotifyPayload = SwitchNotifyPayload | MeasureNotifyPayload
+
+class LoginMode:
+    """Helper to build login payload."""
+
+    @staticmethod
+    def build_payload(pin: str = "0000") -> bytes:
+        # Pin is currently not dynamically built into the hex string here, 
+        # it matches the standard login for "0000"
+        return bytes.fromhex("0f0c170000000000000000000018ffff")
