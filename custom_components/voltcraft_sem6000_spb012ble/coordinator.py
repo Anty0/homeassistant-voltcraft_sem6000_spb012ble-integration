@@ -32,23 +32,25 @@ class VoltcraftData:
     """Data from Voltcraft device measurements."""
 
     is_on: bool
-    power: float
-    voltage: float
-    current: float
-    frequency: int
-    power_factor: float | None
-    consumed_energy: float | None
+    power: float  # Watts (converted from mW)
+    voltage: float  # Volts
+    current: float  # Amps (converted from mA)
+    frequency: int  # Hz
+    power_factor: float | None  # 0.0 - 1.0, calculated from P/(V*I)
+    consumed_energy: float | None  # kWh (converted from Wh)
 
     @staticmethod
-    def from_measure_payload(
+    def from_payload(
         payload: MeasureNotifyPayload,
         fallback_consumed_energy_kwh: float | None = None,
-    ) -> "VoltcraftData":
-        power = payload.power / 1000.0
+    ) -> VoltcraftData:
+        power = payload.power / 1000.0  # mW to W
         voltage = float(payload.voltage)
-        current = payload.current / 1000.0
+        current = payload.current / 1000.0  # mA to A
 
+        # Power factor - calculate from P / (V * I)
         apparent_power = voltage * current
+        power_factor: float | None
         if apparent_power > 0:
             power_factor = min(power / apparent_power, 1.0)
         else:
@@ -56,7 +58,7 @@ class VoltcraftData:
 
         consumed_energy = fallback_consumed_energy_kwh
         if payload.consumed_energy is not None and payload.consumed_energy > 0:
-            consumed_energy = payload.consumed_energy / 1000.0
+            consumed_energy = payload.consumed_energy / 1000.0  # Wh to kWh
 
         return VoltcraftData(
             is_on=payload.is_on,
@@ -88,7 +90,10 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
         self._device_name = device_name
         self._latest_data: VoltcraftData | None = None
 
+        # Some notifications can arrive fragmented, especially history responses
         self._notify_buffer = bytearray()
+
+        # Cached accumulated-consumption history from the device
         self._year_history_wh: tuple[int | None, ...] | None = None
         self._last_history_poll = 0.0
         self._history_request_in_flight = False
@@ -123,12 +128,12 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
         if not values:
             return None
 
-        return sum(values) / 1000.0
+        return sum(values) / 1000.0  # Wh to kWh
 
     async def _request_year_history(self) -> None:
         self._history_request_in_flight = True
 
-        # Small delay after MEASURE request to reduce collisions between requests.
+        # Small delay after MEASURE request to reduce collisions between requests
         await asyncio.sleep(0.1)
 
         await self.client.write_gatt_char(
@@ -139,34 +144,36 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
     async def _async_update_data(self) -> VoltcraftData | None:
         """Fetch data from the device.
 
-        This sends a MEASURE command and periodically also requests yearly
-        consumption history to derive a persistent total-energy reading.
+        This sends a measure command and returns the latest data. The actual data update
+        happens asynchronously via a notification handler.
         """
 
         try:
             await self.client.write_gatt_char(COMMAND_UUID, Command.MEASURE.build_payload())
 
+            # Periodically refresh accumulated device history for a persistent
+            # Total Energy value on devices where MEASURE does not provide one
             now = time.monotonic()
             if now - self._last_history_poll >= 300 and not self._history_request_in_flight:
                 self._last_history_poll = now
                 await self._request_year_history()
 
         except BleakError as err:
-            raise UpdateFailed(f"Failed to send command: {err}") from err
+            raise UpdateFailed(f"Failed to send measure command: {err}") from err
 
         return self._latest_data
 
     async def _handle_notify(self, sender: BleakGATTCharacteristic, data: bytearray) -> None:
         """Handle notifications from the device."""
 
-        _LOGGER.debug("Received notification fragment: %s", data.hex())
+        _LOGGER.debug("Received notification: %s", data.hex())
         self._notify_buffer.extend(data)
 
         while True:
             expected = expected_message_length(self._notify_buffer)
             if expected is None:
                 if self._notify_buffer:
-                    _LOGGER.debug("Dropping stray fragment: %s", self._notify_buffer.hex())
+                    _LOGGER.debug("Dropping invalid notification fragment: %s", self._notify_buffer.hex())
                     self._notify_buffer.clear()
                 return
 
@@ -180,7 +187,7 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
 
             match payload:
                 case MeasureNotifyPayload():
-                    self._latest_data = VoltcraftData.from_measure_payload(
+                    self._latest_data = VoltcraftData.from_payload(
                         payload,
                         fallback_consumed_energy_kwh=self._history_total_kwh(),
                     )
@@ -201,6 +208,7 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
                     self._history_request_in_flight = False
 
                 case SwitchNotifyPayload():
+                    # Switch state changed, trigger immediate measure to update data
                     self.hass.create_task(self.async_request_refresh())
 
                 case None:
