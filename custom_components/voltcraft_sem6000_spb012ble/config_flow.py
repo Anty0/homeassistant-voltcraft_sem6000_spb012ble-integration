@@ -65,7 +65,7 @@ class MainConfigFlow(ConfigFlow, domain=DOMAIN):
                 continue
 
             if SERVICE_UUID in discovery_info.service_uuids:
-                self._discovered_devices[address] = f"{discovery_info.name} ({address})"
+                self._discovered_devices[address] = discovery_info.name
 
         if not self._discovered_devices:
             return self.async_abort(reason="no_devices_found")
@@ -74,7 +74,9 @@ class MainConfigFlow(ConfigFlow, domain=DOMAIN):
             step_id="user",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_MAC): vol.In(self._discovered_devices),
+                    vol.Required(CONF_MAC): vol.In(
+                        {address: f"{name} ({address})" for address, name in self._discovered_devices.items()}
+                    ),
                 }
             ),
         )

@@ -28,9 +28,10 @@ custom_components/voltcraft_sem6000_spb012ble/
 The integration uses Home Assistant's `DataUpdateCoordinator` pattern for centralized BLE communication:
 
 1. **Coordinator** (`coordinator.py`): `VoltcraftDataUpdateCoordinator`
-   - Owns the BLE connection (established via `bleak-retry-connector`)
-   - Registers persistent notification handler on `NOTIFY_UUID`
-   - Polls device every 5 seconds by sending MEASURE command
+   - Owns and lazily (re)establishes the BLE connection via `_async_ensure_connected()` (the single owner of `establish_connection` + `start_notify`, serialized by an `asyncio.Lock`)
+   - Registers persistent notification handler on `NOTIFY_UUID` on every (re)connect
+   - Polls device every 5 seconds by sending MEASURE command, then awaits the response notification (`MEASURE_TIMEOUT`)
+   - Tolerates up to `MAX_MISSED_UPDATES` consecutive cycles without a measurement before raising `UpdateFailed`; a broken link is torn down and reconnected
    - Processes ALL notifications (solicited and unsolicited) asynchronously
    - Distributes measurement data to all entities atomically
 
@@ -42,7 +43,7 @@ The integration uses Home Assistant's `DataUpdateCoordinator` pattern for centra
 ### BLE Communication Flow
 
 1. **Discovery**: Bluetooth devices discovered via Home Assistant's bluetooth integration using service UUID `0000fff0-0000-1000-8000-00805f9b34fb`
-2. **Connection**: BLE connection established in `__init__.py` using `bleak-retry-connector`
+2. **Connection**: BLE connection established lazily by the coordinator (`_async_ensure_connected`) using `bleak-retry-connector`
 3. **Commands**: Sent via GATT characteristic `COMMAND_UUID` (0xfff3)
 4. **Notifications**: Received via `NOTIFY_UUID` (0xfff4)
 5. **Polling**: Coordinator sends MEASURE command every 5 seconds, device responds via notification
@@ -64,14 +65,15 @@ Commands are built using `Command.build_payload()` and responses parsed via `Not
 **Unit conversions** in `VoltcraftData.from_payload()`:
 - Power: milliwatts → watts (÷1000)
 - Current: milliamps → amps (÷1000)
-- Power factor: 0-256 → 0.0-1.0 (÷256)
-- Voltage, frequency, consumed_energy: no conversion
+- Power factor: calculated as P / (V × I), clamped to 1.0; `None` when V × I is 0
+- Energy: watt-hours → kilowatt-hours (÷1000)
+- Voltage, frequency: no conversion
 
 ### Entity Implementations
 
 **Switch Entity** (`switch.py`): `MainSwitchEntity` extends `CoordinatorEntity` and `SwitchEntity`
 - Device class: OUTLET
-- State from `coordinator.data.is_on` with optimistic updates (`_attr_is_on_next`)
+- State from `coordinator.data.is_on`, with an optimistic `_optimistic_is_on` override that the `is_on` property prefers until the next genuine measurement clears it (gated on `coordinator.measurement_count`)
 - Commands sent via `coordinator.async_send_switch_command()`
 - Triggers coordinator refresh after switch commands
 
@@ -153,18 +155,17 @@ All three checks must pass before code can be merged.
 ## Key Implementation Notes
 
 ### BLE Connection Management
-- Connection established in `__init__.py:async_setup_entry()` using `establish_connection()`
-- Connection owned by coordinator, not individual entities
-- Coordinator lifecycle:
-  - `async_setup()`: Start notifications on NOTIFY_UUID
-  - `async_shutdown()`: Stop notifications and disconnect client
-  - Called from `__init__.py` setup/unload
+- Connection fully owned by the coordinator; `__init__.py` only resolves the `BLEDevice` and constructs the coordinator
+- `_async_ensure_connected()` is the single owner of connect + `start_notify`, called at the start of `_async_update_data()` and `async_send_switch_command()`, serialized by `_connect_lock`; it looks up the device by the address and resets the missed-update counter on every successful connect
+- The first connection happens via `async_config_entry_first_refresh()`, which surfaces failures as `ConfigEntryNotReady`
+- `async_shutdown()`: calls `super().async_shutdown()` (cancels the scheduled refresh), then stops notifications and disconnects (guarded, tolerates an already-disconnected client)
+- All GATT writes/`stop_notify` are serialized by `_operation_lock` so a user switch command cannot overlap a poll's MEASURE write
 
 ### State Synchronization and Polling
-- Device polled every 5 seconds via coordinator's `_async_update_data()`
-- Coordinator sends MEASURE command asynchronously
-- Notification handler processes responses and updates all entities via `async_set_updated_data()`
+- Device polled every 5 seconds via coordinator's `_async_update_data()`, which writes MEASURE and awaits the response notification up to `MEASURE_TIMEOUT`
+- Notification handler processes responses and updates all entities via `async_set_updated_data()`; it also resets the missed-update counter and increments `measurement_count`
 - Handles both solicited (from polling) and unsolicited notifications (manual switch press)
+- A single timed-out cycle returns the last-known data; `MAX_MISSED_UPDATES` consecutive misses (or never having received any data) raise `UpdateFailed`
 
 ### Notification Handling
 - Single persistent notification handler in coordinator

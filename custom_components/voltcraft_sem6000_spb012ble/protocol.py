@@ -54,21 +54,20 @@ class SwitchModes(IntEnum):
 class NotifyPayload:
     @staticmethod
     def from_payload(payload: bytearray) -> ParsedNotifyPayload | None:
-        if payload[0] != 0x0F:
+        if len(payload) < 2 or payload[0] != 0x0F:
             # Not a valid payload
             return None
 
         length = payload[1]
         body = payload[2 : length + 2]
 
+        if length + 2 > len(payload) or len(body) < 3:
+            return None
+
         params = body[0:-1]
 
-        # # The checksum always seems to be wrong...
-        # checksum = body[-1]
-        # checksumExpected = (1 + sum(list(params))) % 256
-        # if checksum != checksumExpected:
-        #     # Not a valid payload
-        #     return None
+        # Checksum validation is disabled: checksums from the device never match
+        # the computed value, so we cannot use them to reject payloads.
 
         command = params[0]
 
@@ -83,6 +82,10 @@ class NotifyPayload:
             return None
 
 
+# Minimum valid MEASURE frame length (see the module docstring layout).
+MEASURE_ARGS_MIN_LEN = 12
+
+
 @dataclass(frozen=True)
 class MeasureNotifyPayload(NotifyPayload):
     is_on: bool
@@ -93,16 +96,17 @@ class MeasureNotifyPayload(NotifyPayload):
     consumed_energy: int
 
     @staticmethod
-    def from_data(data: bytearray) -> MeasureNotifyPayload:
-        # data[8:10] are unknown padding bytes — skip them
-        # consumed_energy starts at offset 10; length varies by hw version
+    def from_data(data: bytearray) -> MeasureNotifyPayload | None:
+        if len(data) < MEASURE_ARGS_MIN_LEN:
+            # Truncated frame
+            return None
         return MeasureNotifyPayload(
             is_on=bool(data[0]),
             power=int.from_bytes(data[1:4], byteorder="big"),
             voltage=int(data[4]),
             current=int.from_bytes(data[5:7], byteorder="big"),
             frequency=int(data[7]),
-            consumed_energy=int.from_bytes(data[10:], byteorder="big"),
+            consumed_energy=int.from_bytes(data[10:14], byteorder="big"),
         )
 
 
