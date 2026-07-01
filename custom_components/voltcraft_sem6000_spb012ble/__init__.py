@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_MAC, Platform
+from homeassistant.const import CONF_MAC, CONF_PIN, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
 
@@ -18,7 +18,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if not ble_device:
         raise ConfigEntryNotReady(f"Device {mac_address} not found")
 
-    coord = VoltcraftDataUpdateCoordinator(hass, mac_address, ble_device)
+    coord = VoltcraftDataUpdateCoordinator(hass, entry, mac_address, ble_device, entry.data.get(CONF_PIN))
 
     await coord.async_config_entry_first_refresh()
 

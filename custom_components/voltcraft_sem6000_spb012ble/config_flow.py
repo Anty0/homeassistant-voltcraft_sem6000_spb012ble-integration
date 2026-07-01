@@ -5,16 +5,17 @@ from typing import Any
 
 import voluptuous as vol
 
-from homeassistant.const import CONF_MAC
+from homeassistant.const import CONF_MAC, CONF_PIN
 from homeassistant.helpers.device_registry import format_mac
 from homeassistant.components import onboarding
 from homeassistant.components.bluetooth import (
     BluetoothServiceInfoBleak,
     async_discovered_service_info,
 )
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
+from homeassistant.config_entries import SOURCE_REAUTH, ConfigFlow, ConfigFlowResult
 
 from .const import DOMAIN, DEVICE_NAME, SERVICE_UUID
+from .protocol import LoginCommand
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -36,13 +37,22 @@ class MainConfigFlow(ConfigFlow, domain=DOMAIN):
         return await self.async_step_confirm()
 
     async def async_step_confirm(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        if user_input is not None or not onboarding.async_is_onboarded(self.hass):
-            return self._create_entry()
+        if user_input is None and not onboarding.async_is_onboarded(self.hass):
+            return self._create_entry(None)
 
-        self._set_confirm_only()
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            pin, error = self._validate_pin(user_input, required=False)
+            if error:
+                errors["base"] = error
+            else:
+                return self._create_entry(pin)
+
         return self.async_show_form(
             step_id="confirm",
+            data_schema=vol.Schema({vol.Optional(CONF_PIN): str}),
             description_placeholders={"name": self._name},
+            errors=errors,
         )
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
@@ -81,6 +91,47 @@ class MainConfigFlow(ConfigFlow, domain=DOMAIN):
             ),
         )
 
+    async def async_step_reauth(self, entry_data: dict[str, Any]) -> ConfigFlowResult:
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            pin, error = self._validate_pin(user_input, required=True)
+            if error:
+                errors["base"] = error
+            else:
+                return self.async_update_reload_and_abort(self._get_reauth_entry(), data_updates={CONF_PIN: pin})
+
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=vol.Schema({vol.Required(CONF_PIN): str}),
+            errors=errors,
+        )
+
+    async def async_step_reconfigure(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        entry = self._get_reconfigure_entry()
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            pin, error = self._validate_pin(user_input, required=False)
+            if error:
+                errors["base"] = error
+            else:
+                new_data = dict(entry.data)
+                if pin is None:
+                    new_data.pop(CONF_PIN, None)
+                else:
+                    new_data[CONF_PIN] = pin
+                for flow in entry.async_get_active_flows(self.hass, {SOURCE_REAUTH}):
+                    self.hass.config_entries.flow.async_abort(flow["flow_id"])
+                return self.async_update_reload_and_abort(entry, data=new_data)
+
+        current_pin = entry.data.get(CONF_PIN)
+        schema = vol.Schema({vol.Optional(CONF_PIN): str})
+        if current_pin:
+            schema = self.add_suggested_values_to_schema(schema, {CONF_PIN: current_pin})
+        return self.async_show_form(step_id="reconfigure", data_schema=schema, errors=errors)
+
     @property
     def _name(self) -> str:
         return self.context["title_placeholders"]["name"] or DEVICE_NAME
@@ -89,8 +140,19 @@ class MainConfigFlow(ConfigFlow, domain=DOMAIN):
     def _name(self, name: str) -> None:
         self.context["title_placeholders"] = {"name": name}
 
-    def _create_entry(self) -> ConfigFlowResult:
-        return self.async_create_entry(
-            title=self._name,
-            data={CONF_MAC: self._mac_address},
-        )
+    def _create_entry(self, pin: str | None) -> ConfigFlowResult:
+        data: dict[str, Any] = {CONF_MAC: self._mac_address}
+        if pin is not None:
+            data[CONF_PIN] = pin
+        return self.async_create_entry(title=self._name, data=data)
+
+    def _validate_pin(self, user_input: dict[str, Any], *, required: bool) -> tuple[str | None, str | None]:
+        value = user_input.get(CONF_PIN)
+        if not value:
+            return (None, "invalid_pin") if required else (None, None)
+        if not isinstance(value, str):
+            return None, "invalid_pin"
+        try:
+            return LoginCommand.normalize_pin(value), None
+        except ValueError:
+            return None, "invalid_pin"

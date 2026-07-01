@@ -10,8 +10,9 @@ from bleak.exc import BleakError
 from bleak_retry_connector import establish_connection
 
 from homeassistant.components import bluetooth
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH, DeviceInfo, format_mac
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
@@ -19,6 +20,7 @@ from .const import (
     COMMAND_UUID,
     DEVICE_NAME,
     DOMAIN,
+    LOGIN_TIMEOUT,
     MAX_MISSED_UPDATES,
     MEASURE_TIMEOUT,
     NOTIFY_UUID,
@@ -26,10 +28,12 @@ from .const import (
 )
 from .protocol import (
     Command,
+    LoginNotifyPayload,
     MeasureNotifyPayload,
     NotifyPayload,
     SwitchModes,
     SwitchNotifyPayload,
+    LoginCommand,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -76,22 +80,30 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
     def __init__(
         self,
         hass: HomeAssistant,
+        config_entry: ConfigEntry,
         mac: str,
         ble_device: BLEDevice,
+        pin: str | None,
     ) -> None:
         super().__init__(
             hass,
             _LOGGER,
+            config_entry=config_entry,
             name=f"{DOMAIN}_{mac}",
             update_interval=SCAN_INTERVAL,
         )
         self._mac_address = mac
         self.mac = format_mac(mac)
         self._device_name = ble_device.name
+        self._pin = pin
         self.client: BleakClient | None = None
         self._connect_lock = asyncio.Lock()
         self._operation_lock = asyncio.Lock()
         self._measure_cond = asyncio.Condition()
+        self._login_cond = asyncio.Condition()
+        self._login_count = 0
+        self._login_result: bool | None = None
+        self._login_warning_logged = False
         self._missed_updates = 0
         self.measurement_count = 0
 
@@ -143,6 +155,12 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
                 # Switch state changed, trigger immediate measure to update data
                 self.hass.async_create_task(self.async_request_refresh())
 
+            case LoginNotifyPayload():
+                async with self._login_cond:
+                    self._login_result = payload.was_successful
+                    self._login_count += 1
+                    self._login_cond.notify_all()
+
             case None:
                 _LOGGER.warning("Unknown payload received: %s", data.hex())
 
@@ -158,6 +176,7 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
             _LOGGER.debug("Error stopping notifications: %s", err)
 
         await self._async_safe_disconnect(self.client, "shutdown")
+        self.client = None
 
     async def async_send_switch_command(self, mode: SwitchModes) -> None:
         """Send a switch command to the device."""
@@ -166,7 +185,7 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
             async with asyncio.timeout(MEASURE_TIMEOUT):
                 async with self._operation_lock:
                     await client.write_gatt_char(COMMAND_UUID, mode.build_payload())
-        except (TimeoutError, BleakError, UpdateFailed) as err:
+        except (TimeoutError, BleakError, UpdateFailed, ConfigEntryAuthFailed) as err:
             _LOGGER.error("Failed to send switch command: %s", err)
             raise HomeAssistantError(f"Failed to send switch command: {err}") from err
 
@@ -199,14 +218,50 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
                 # start_notify has no internal timeout and can hang
                 async with asyncio.timeout(MEASURE_TIMEOUT):
                     await client.start_notify(NOTIFY_UUID, self._handle_notify)
+                await self._async_login(client)
             except (TimeoutError, BleakError) as err:
                 if client is not None:
                     await self._async_safe_disconnect(client, "after failed connect")
                 raise UpdateFailed(f"Failed to connect to {self._mac_address}: {err}") from err
+            except ConfigEntryAuthFailed:
+                if client is not None:
+                    await self._async_safe_disconnect(client, "after failed login")
+                raise
 
             self.client = client
             self._missed_updates = 0
             return client
+
+    async def _async_login(self, client: BleakClient) -> None:
+        """Authenticate the session when a PIN is configured (firmware that requires it)."""
+        if self._pin is None:
+            return
+
+        try:
+            payload = LoginCommand.build_payload(self._pin)
+        except ValueError as err:
+            raise ConfigEntryAuthFailed("Invalid stored PIN") from err
+
+        start = self._login_count
+        try:
+            async with asyncio.timeout(LOGIN_TIMEOUT):
+                async with self._operation_lock:
+                    await client.write_gatt_char(COMMAND_UUID, payload)
+                async with self._login_cond:
+                    await self._login_cond.wait_for(lambda: self._login_count != start)
+                    success = self._login_result
+        except TimeoutError:
+            if not self._login_warning_logged:
+                _LOGGER.warning(
+                    "Login to %s timed out; the configured PIN may be wrong or the device may not use a PIN",
+                    self._mac_address,
+                )
+                self._login_warning_logged = True
+            raise
+
+        if not success:
+            raise ConfigEntryAuthFailed("Invalid PIN")
+        self._login_warning_logged = False
 
     async def _async_safe_disconnect(self, client: BleakClient, context: str) -> None:
         try:

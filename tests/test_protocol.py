@@ -12,10 +12,12 @@ import pytest
 
 from custom_components.voltcraft_sem6000_spb012ble.protocol import (
     Command,
+    LoginNotifyPayload,
     MeasureNotifyPayload,
     NotifyPayload,
     SwitchModes,
     SwitchNotifyPayload,
+    LoginCommand,
 )
 
 # Synthesized 12-byte (hw v3, 2-byte energy) MEASURE argument block.
@@ -136,3 +138,47 @@ def test_switch_build_to_from_payload_round_trip():
 )
 def test_malformed_payload_returns_none(payload):
     assert NotifyPayload.from_payload(payload) is None
+
+
+def test_build_login_payload_zero_pin_matches_reference_frame():
+    # Byte-identical to the community-reverse-engineered static "0000" login frame.
+    assert LoginCommand.build_payload("0000") == bytearray.fromhex("0f0c170000000000000000000018ffff")
+
+
+def test_build_login_payload_encodes_digits_one_byte_each():
+    payload = LoginCommand.build_payload("1234")
+    # frame = [0x0F, len, cmd, 0x00, *params, checksum, 0xFF, 0xFF];
+    # params = [0x00] + digit bytes + [0,0,0,0], so digit bytes for "1234" sit at [5:9].
+    assert payload[5:9] == bytearray([0x01, 0x02, 0x03, 0x04])
+    # Round-trips through the shared framing: header, length, command, checksum, footer.
+    assert payload[0] == 0x0F and payload[1] == 0x0C and payload[2] == Command.LOGIN
+    assert payload[-2:] == bytearray([0xFF, 0xFF])
+
+
+@pytest.mark.parametrize("pin", ["", "123", "12345", "12a4", " 12 ", "12.4", "١٢٣٤", "１２３４"])
+def test_normalize_pin_and_build_reject_invalid(pin):
+    with pytest.raises(ValueError):
+        LoginCommand.normalize_pin(pin)
+    with pytest.raises(ValueError):
+        LoginCommand.build_payload(pin)
+
+
+def test_normalize_pin_strips_and_returns_value():
+    assert LoginCommand.normalize_pin(" 1234 ") == "1234"
+    assert LoginCommand.normalize_pin("0000") == "0000"
+
+
+def test_login_response_frames_parse_to_status():
+    success = NotifyPayload.from_payload(bytearray.fromhex("0f06170000000018ffff"))
+    assert isinstance(success, LoginNotifyPayload)
+    assert success.was_successful is True
+
+    failure = NotifyPayload.from_payload(bytearray.fromhex("0f06170001000018ffff"))
+    assert isinstance(failure, LoginNotifyPayload)
+    assert failure.was_successful is False
+
+
+def test_truncated_login_frame_returns_none():
+    # Valid framing but no status byte: arguments are empty after the command/separator
+    # split, so LoginNotifyPayload.from_data hits its len(data) < 1 guard.
+    assert NotifyPayload.from_payload(bytearray([0x0F, 0x03, Command.LOGIN, 0x00, 0x00, 0xFF, 0xFF])) is None

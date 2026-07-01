@@ -25,7 +25,6 @@ The device supports additional features (commands), which I don't plan to suppor
 - Get/set device name
 - Set the power limit (called Power Protection in the app)
 - Power consumption history (Home Assistant will already collect power consumption data by itself)
-- Password protection
 - Calibration
 - Firmware update
 
@@ -83,8 +82,22 @@ If the device is found, it will appear in the integration list under **Devices &
 3. Click **+ Add Integration**
 4. Search for "Voltcraft SEM6000 / SPB012BLE"
 5. Select your device from the list of discovered Bluetooth devices
-6. Confirm the device selection
+6. Confirm the device selection. If your device requires a PIN, enter the 4-digit PIN here; otherwise leave it blank
 7. The integration will create a switch entity for your power plug
+
+### PIN / Authentication
+
+Some hardware/firmware versions require a 4-digit PIN before the plug accepts commands. PIN support is optional:
+
+- **Set the PIN at setup** in the confirmation step (leave blank if your device doesn't use one).
+- **Add, change, or remove the PIN later** via the integration's **Reconfigure** option (Settings → Devices & Services → the integration → Configure). Leave the field blank to clear the PIN.
+
+Behavior depends on the device firmware:
+
+- On firmware that **reports** a wrong PIN, the integration shows a re-authentication prompt and **pauses polling** until you re-enter the correct PIN (or fix it via Reconfigure). It does not silently self-heal.
+- On firmware that **silently ignores** a bad login, there is **no** re-authentication prompt — the device simply shows as *unavailable* and the (mains-powered) integration keeps retrying every few seconds until the PIN is corrected or cleared.
+
+If a reachable device is stuck *unavailable* with no re-authentication prompt, the cause may be a required-but-unset PIN, a wrong PIN on silently-ignoring firmware, or a device that doesn't use PIN login — so **set, verify, or clear the PIN via Reconfigure**. The logs show a one-time PIN-timeout warning to help diagnose.
 
 ## Entities
 

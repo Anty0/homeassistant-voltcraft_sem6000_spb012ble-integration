@@ -1,89 +1,62 @@
-"""Tests for the coordinator's update/timeout/reconnect state machine.
+"""Tests for the coordinator's update/timeout/reconnect/login state machine.
 
 Driven with a fake BleakClient and the Home Assistant test harness. The
-module-level MEASURE_TIMEOUT is patched small so timed-out cycles are fast.
+module-level MEASURE_TIMEOUT / LOGIN_TIMEOUT are patched small so timed-out cycles
+are fast.
 """
 
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from bleak.exc import BleakError
+from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.config_entries import SOURCE_REAUTH
+from homeassistant.const import CONF_MAC
+from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
 from custom_components.voltcraft_sem6000_spb012ble import coordinator as coord_mod
+from custom_components.voltcraft_sem6000_spb012ble.const import DOMAIN
 from custom_components.voltcraft_sem6000_spb012ble.coordinator import (
     VoltcraftData,
     VoltcraftDataUpdateCoordinator,
 )
-from custom_components.voltcraft_sem6000_spb012ble.protocol import MeasureNotifyPayload
-
-RAW_MAC = "AA:BB:CC:DD:EE:FF"
-FORMATTED_MAC = "aa:bb:cc:dd:ee:ff"
-
-MEASURE_ARGS = bytearray([0x01, 0x00, 0x05, 0xDC, 0xE6, 0x00, 0xFA, 0x32, 0xAB, 0xCD, 0x04, 0xD2])
-
-
-def measure_frame() -> bytearray:
-    params = bytearray([0x04, 0x00]) + MEASURE_ARGS
-    body = params + bytearray([0x00])
-    return bytearray([0x0F, len(body)]) + body + bytearray([0xFF, 0xFF])
-
-
-def switch_frame() -> bytearray:
-    params = bytearray([0x03, 0x00, 0x01])
-    body = params + bytearray([0x00])
-    return bytearray([0x0F, len(body)]) + body + bytearray([0xFF, 0xFF])
+from custom_components.voltcraft_sem6000_spb012ble.protocol import (
+    MeasureNotifyPayload,
+    LoginCommand,
+)
+from tests.ble_harness import (
+    FORMATTED_MAC,
+    LOGIN_FAILURE_FRAME,
+    LOGIN_SUCCESS_FRAME,
+    RAW_MAC,
+    FakeClient,
+    measure_frame,
+    switch_frame,
+    written_commands,
+)
 
 
-class FakeClient:
-    def __init__(self) -> None:
-        self.is_connected = True
-        self.notify_cb = None
-        self.written: list[bytes] = []
-        self.stopped = False
-        self.disconnect_error = False
-        self.raise_on_write = False
-        self.hang_on_write = False
-        self.auto_measure_frame: bytearray | None = None
-
-    async def start_notify(self, uuid, cb) -> None:
-        self.notify_cb = cb
-
-    async def stop_notify(self, uuid) -> None:
-        self.stopped = True
-
-    async def write_gatt_char(self, uuid, data) -> None:
-        if self.raise_on_write:
-            raise BleakError("write failed")
-        if self.hang_on_write:
-            await asyncio.Event().wait()  # never resolves; relies on the caller's timeout
-        self.written.append(bytes(data))
-        if self.auto_measure_frame is not None and bytes(data)[2] == 0x04:
-            asyncio.get_running_loop().create_task(self._deliver(self.auto_measure_frame))
-
-    async def _deliver(self, frame: bytearray) -> None:
-        if self.notify_cb is not None:
-            await self.notify_cb(None, frame)
-
-    async def deliver_measure(self, frame: bytearray) -> None:
-        await self.notify_cb(None, frame)
-
-    async def disconnect(self) -> None:
-        if self.disconnect_error:
-            raise BleakError("disconnect failed")
-        self.is_connected = False
+def reauth_flows(hass, entry) -> list:
+    return [
+        flow
+        for flow in hass.config_entries.flow.async_progress()
+        if flow["context"].get("source") == SOURCE_REAUTH and flow["context"].get("entry_id") == entry.entry_id
+    ]
 
 
 @dataclass
 class Env:
     coord: VoltcraftDataUpdateCoordinator
+    entry: MockConfigEntry
+    ble_device: SimpleNamespace
     establish_mock: AsyncMock
     lookup_mock: MagicMock
     clients: list[FakeClient]
@@ -93,11 +66,12 @@ class Env:
 def env(hass, monkeypatch):
     ble_device = SimpleNamespace(name="Test Plug", address=RAW_MAC)
     clients: list[FakeClient] = []
-    state = {"default_frame": None}
+    state = {"default_frame": None, "default_login_frame": None}
 
     def _establish(*args, **kwargs):
         client = FakeClient()
         client.auto_measure_frame = state["default_frame"]
+        client.auto_login_frame = state["default_login_frame"]
         clients.append(client)
         return client
 
@@ -105,17 +79,29 @@ def env(hass, monkeypatch):
     lookup_mock = MagicMock(return_value=ble_device)
 
     monkeypatch.setattr(coord_mod, "MEASURE_TIMEOUT", 0.1)
+    monkeypatch.setattr(coord_mod, "LOGIN_TIMEOUT", 0.1)
     monkeypatch.setattr(coord_mod, "establish_connection", establish_mock)
     monkeypatch.setattr(coord_mod.bluetooth, "async_ble_device_from_address", lookup_mock)
 
-    coord = VoltcraftDataUpdateCoordinator(hass, RAW_MAC, ble_device)
+    entry = MockConfigEntry(domain=DOMAIN, data={CONF_MAC: RAW_MAC}, unique_id=FORMATTED_MAC)
+    entry.add_to_hass(hass)
 
-    holder = Env(coord, establish_mock, lookup_mock, clients)
+    coord = VoltcraftDataUpdateCoordinator(hass, entry, RAW_MAC, ble_device, None)
+
+    holder = Env(coord, entry, ble_device, establish_mock, lookup_mock, clients)
 
     def _set_default(frame):
         state["default_frame"] = frame
 
+    def _set_default_login(frame):
+        state["default_login_frame"] = frame
+
+    def _build_coord(pin):
+        return VoltcraftDataUpdateCoordinator(hass, entry, RAW_MAC, ble_device, pin)
+
     holder._set_default = _set_default  # type: ignore[attr-defined]
+    holder._set_default_login = _set_default_login  # type: ignore[attr-defined]
+    holder.build_coord = _build_coord  # type: ignore[attr-defined]
     return holder
 
 
@@ -412,7 +398,16 @@ async def test_async_shutdown_disconnects(env):
     client = env.coord.client
     await env.coord.async_shutdown()
     assert client.stopped is True
-    assert env.coord.client.is_connected is False
+    assert client.is_connected is False
+    assert env.coord.client is None
+
+
+async def test_async_shutdown_is_idempotent(env):
+    env._set_default(measure_frame())
+    await env.coord._async_update_data()
+    await env.coord.async_shutdown()
+    await env.coord.async_shutdown()  # second call early-returns at the None guard, no raise
+    assert env.coord.client is None
 
 
 async def test_switch_notification_triggers_refresh(env):
@@ -464,6 +459,330 @@ async def test_operation_lock_released_before_measure_await(env, monkeypatch):
     await asyncio.wait_for(env.coord._operation_lock.acquire(), 0.1)
     env.coord._operation_lock.release()
 
-    await env.clients[-1].deliver_measure(measure_frame())
+    await env.clients[-1].deliver_frame(measure_frame())
     data = await update_task
     assert isinstance(data, VoltcraftData)
+
+
+# --- PIN / login ---------------------------------------------------------------------------------
+
+
+async def test_no_pin_sends_no_login(env):
+    env._set_default(measure_frame())
+    data = await env.coord._async_update_data()  # coord built with pin=None
+    assert isinstance(data, VoltcraftData)
+    assert all(w[2] != 0x17 for w in env.clients[-1].written)
+
+
+async def test_pin_login_success_then_measure(env):
+    coord = env.build_coord("1234")
+    env._set_default(measure_frame())
+    env._set_default_login(LOGIN_SUCCESS_FRAME)
+    data = await coord._async_update_data()
+
+    client = env.clients[-1]
+    assert client.written[0] == bytes(LoginCommand.build_payload("1234"))
+    assert written_commands(client).index(0x17) < written_commands(client).index(0x04)  # login before measure
+    assert isinstance(data, VoltcraftData)
+    assert coord.measurement_count == 1
+
+
+async def test_login_sent_once_per_live_connection(env):
+    coord = env.build_coord("1234")
+    env._set_default(measure_frame())
+    env._set_default_login(LOGIN_SUCCESS_FRAME)
+    await coord._async_update_data()
+    await coord._async_update_data()  # same live connection
+
+    client = env.clients[-1]
+    assert written_commands(client).count(0x17) == 1
+    assert coord.measurement_count == 2
+
+
+async def test_login_timeout_governed_by_login_timeout(env, monkeypatch):
+    # LOGIN_TIMEOUT small, MEASURE_TIMEOUT large: a regression wiring login to
+    # MEASURE_TIMEOUT would block ~2s and blow the wall-clock bound.
+    monkeypatch.setattr(coord_mod, "LOGIN_TIMEOUT", 0.1)
+    monkeypatch.setattr(coord_mod, "MEASURE_TIMEOUT", 2.0)
+    coord = env.build_coord("1234")
+    env._set_default_login(None)  # no login frame -> the login wait times out
+
+    start = time.monotonic()
+    with pytest.raises(UpdateFailed):
+        await coord._async_update_data()
+    elapsed = time.monotonic() - start
+    assert elapsed < 1.0
+
+
+async def test_login_failure_frame_raises_auth_failed(env):
+    coord = env.build_coord("1234")
+    env._set_default_login(LOGIN_FAILURE_FRAME)
+    with pytest.raises(ConfigEntryAuthFailed):
+        await coord._async_ensure_connected()
+    assert coord.client is None
+    assert env.clients[-1].is_connected is False  # orphan disconnected
+
+
+async def test_reauth_wiring_on_failure_frame(hass, env):
+    coord = env.build_coord("1234")
+    env._set_default_login(LOGIN_FAILURE_FRAME)
+    await coord.async_refresh()
+    await hass.async_block_till_done()  # async_start_reauth inits the flow on a task
+    assert coord.last_update_success is False
+    assert len(reauth_flows(hass, env.entry)) == 1
+
+
+async def test_reauth_non_accumulation(hass, env):
+    coord = env.build_coord("1234")
+    env._set_default_login(LOGIN_FAILURE_FRAME)
+    await coord.async_refresh()
+    await hass.async_block_till_done()
+    await coord.async_refresh()
+    await hass.async_block_till_done()
+    assert len(reauth_flows(hass, env.entry)) == 1  # async_start_reauth is idempotent
+
+
+async def test_login_timeout_does_not_start_reauth(hass, env):
+    coord = env.build_coord("1234")
+    env._set_default_login(None)  # silent firmware: login times out
+    await coord.async_refresh()
+    await hass.async_block_till_done()
+    assert coord.last_update_success is False
+    assert reauth_flows(hass, env.entry) == []  # transient -> no reauth
+
+
+async def test_login_write_bleak_error_does_not_start_reauth(hass, env):
+    coord = env.build_coord("1234")
+
+    def _establish(*args, **kwargs):
+        client = FakeClient()
+        client.raise_on_login_write = True
+        env.clients.append(client)
+        return client
+
+    env.establish_mock.side_effect = _establish
+    await coord.async_refresh()
+    await hass.async_block_till_done()
+    assert coord.last_update_success is False
+    assert reauth_flows(hass, env.entry) == []
+    assert coord.client is None
+    assert env.clients[-1].is_connected is False
+    assert not coord._operation_lock.locked()
+
+
+async def test_login_timeout_warning_gated(env, caplog):
+    coord = env.build_coord("1234")
+    env._set_default_login(None)
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(UpdateFailed):
+            await coord._async_update_data()  # first connect: warning + UpdateFailed
+        coord.client = None  # force a fresh connect next cycle
+        with pytest.raises(UpdateFailed):
+            await coord._async_update_data()  # second timeout, same episode
+    assert sum("Login to" in r.message for r in caplog.records) == 1
+
+
+async def test_login_timeout_warning_rearmed_after_success(env, caplog):
+    coord = env.build_coord("1234")
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        env._set_default_login(None)
+        with pytest.raises(UpdateFailed):
+            await coord._async_update_data()  # warning #1
+
+        env._set_default_login(LOGIN_SUCCESS_FRAME)
+        env._set_default(measure_frame())
+        await coord._async_update_data()  # success clears the gate
+
+        env._set_default_login(None)
+        coord.client.is_connected = False
+        with pytest.raises(UpdateFailed):
+            await coord._async_update_data()  # warning #2 (re-armed)
+    assert sum("Login to" in r.message for r in caplog.records) == 2
+
+
+async def test_no_pin_timeout_logs_no_warning(env, caplog):
+    env._set_default(None)  # device never answers MEASURE; no PIN configured
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(UpdateFailed):
+            await env.coord._async_update_data()
+    assert not any("Login to" in r.message for r in caplog.records)
+
+
+async def test_login_timeout_on_reconnect_immediate(env):
+    coord = env.build_coord("1234")
+    env._set_default(measure_frame())
+    env._set_default_login(LOGIN_SUCCESS_FRAME)
+    await coord._async_update_data()  # seed one good measurement
+    assert coord._missed_updates == 0
+
+    prior = coord.client
+    coord.client.is_connected = False
+    env._set_default_login(None)  # reconnect login goes silent
+    with pytest.raises(UpdateFailed):
+        await coord._async_update_data()  # immediate, no missed-update tolerance
+    assert coord._missed_updates == 0
+    assert coord.client is prior  # stale client kept (replaced on the next reconnect)
+    assert env.clients[-1].is_connected is False  # fresh orphan disconnected
+
+
+async def test_invalid_stored_pin_raises_auth_failed(env):
+    coord = env.build_coord("12")  # malformed stored PIN
+    with pytest.raises(ConfigEntryAuthFailed):
+        await coord._async_ensure_connected()
+
+
+async def test_stale_login_result_not_reused(env):
+    coord = env.build_coord("1234")
+    env._set_default(measure_frame())
+    env._set_default_login(LOGIN_SUCCESS_FRAME)
+    await coord._async_update_data()  # _login_result True, _login_count 1
+
+    coord.client.is_connected = False
+    env._set_default_login(None)  # no login frame on reconnect
+    with pytest.raises(UpdateFailed):
+        await coord._async_update_data()  # must time out, not re-read the stale True
+
+
+async def test_malformed_login_frame_mid_login(env):
+    coord = env.build_coord("1234")
+
+    def _establish(*args, **kwargs):
+        client = FakeClient()
+        client.auto_login_frame = bytearray([0x0F, 0x02, 0x17, 0x00, 0xFF, 0xFF])  # garbage
+        env.clients.append(client)
+        return client
+
+    env.establish_mock.side_effect = _establish
+    with pytest.raises(UpdateFailed):
+        await coord._async_ensure_connected()
+    assert coord.client is None
+
+
+async def test_reconnect_resends_login_before_measure(env):
+    coord = env.build_coord("1234")
+    env._set_default(measure_frame())
+    env._set_default_login(LOGIN_SUCCESS_FRAME)
+    await coord._async_update_data()
+
+    coord.client.is_connected = False
+    await coord._async_update_data()  # reconnect
+    client = env.clients[-1]  # the fresh client
+    assert written_commands(client).index(0x17) < written_commands(client).index(0x04)
+
+
+async def test_steady_state_reauth_two_cycles(hass, env):
+    coord = env.build_coord("1234")
+    env._set_default(measure_frame())
+    env._set_default_login(LOGIN_SUCCESS_FRAME)
+    await coord._async_update_data()  # one good measurement
+    prior_client = coord.client
+
+    env._set_default_login(LOGIN_FAILURE_FRAME)
+    for _ in range(2):
+        coord.client.is_connected = False
+        with pytest.raises(ConfigEntryAuthFailed):
+            await coord._async_update_data()
+        assert coord._missed_updates == 0
+        assert coord.client is prior_client  # retained: not nulled, not the orphan
+        assert env.clients[-1].is_connected is False  # fresh orphan disconnected
+
+
+async def test_switch_happy_path_with_pin(env):
+    coord = env.build_coord("1234")
+    env._set_default_login(LOGIN_SUCCESS_FRAME)
+    await coord.async_send_switch_command(coord_mod.SwitchModes.ON)
+    client = env.clients[-1]
+    assert written_commands(client).index(0x17) < written_commands(client).index(0x03)
+
+
+async def test_switch_auth_failure_wrapped_no_reauth(hass, env):
+    coord = env.build_coord("1234")
+    env._set_default_login(LOGIN_FAILURE_FRAME)
+    with pytest.raises(HomeAssistantError) as exc_info:
+        await coord.async_send_switch_command(coord_mod.SwitchModes.ON)
+    await hass.async_block_till_done()
+    assert not isinstance(exc_info.value, ConfigEntryAuthFailed)
+    assert "Failed to send switch command" in str(exc_info.value)
+    assert reauth_flows(hass, env.entry) == []  # switch path does not spawn reauth
+
+
+async def test_switch_transient_login_failure_wrapped(hass, env):
+    coord = env.build_coord("1234")
+
+    def _establish(*args, **kwargs):
+        client = FakeClient()
+        client.raise_on_login_write = True
+        env.clients.append(client)
+        return client
+
+    env.establish_mock.side_effect = _establish
+    with pytest.raises(HomeAssistantError) as exc_info:
+        await coord.async_send_switch_command(coord_mod.SwitchModes.ON)
+    await hass.async_block_till_done()
+    assert not isinstance(exc_info.value, ConfigEntryAuthFailed)
+    assert not isinstance(exc_info.value, UpdateFailed)
+    assert reauth_flows(hass, env.entry) == []
+    assert not coord._operation_lock.locked()
+
+
+async def test_operation_lock_released_while_login_parked(env):
+    coord = env.build_coord("1234")
+    env._set_default_login(None)  # deliver manually so login parks on the cond
+    task = asyncio.create_task(coord._async_ensure_connected())
+    await asyncio.sleep(0.02)
+
+    assert not coord._operation_lock.locked()  # released before the cond await
+    await env.clients[-1].deliver_frame(LOGIN_SUCCESS_FRAME)
+    await task
+    assert coord.client is not None
+
+
+async def test_cross_isolation_measure_does_not_satisfy_login(env, monkeypatch):
+    monkeypatch.setattr(coord_mod, "LOGIN_TIMEOUT", 1.0)
+    coord = env.build_coord("1234")
+    env._set_default_login(None)
+    task = asyncio.create_task(coord._async_ensure_connected())
+    await asyncio.sleep(0.02)  # login parked on _login_cond
+
+    login_count_before = coord._login_count
+    await coord._handle_notify(None, measure_frame())  # a MEASURE frame, not LOGIN
+    await asyncio.sleep(0.02)
+    assert coord._login_count == login_count_before  # login NOT satisfied
+    assert not task.done()
+    assert coord.measurement_count == 1  # routed to the measure path
+
+    await env.clients[-1].deliver_frame(LOGIN_SUCCESS_FRAME)
+    await task  # login now completes
+
+
+async def test_cross_isolation_login_does_not_satisfy_measure(env, monkeypatch):
+    monkeypatch.setattr(coord_mod, "MEASURE_TIMEOUT", 0.2)
+    env._set_default(measure_frame())
+    await env.coord._async_update_data()  # connect (no PIN)
+    count_before = env.coord.measurement_count
+
+    env.clients[-1].auto_measure_frame = None
+    task = asyncio.create_task(env.coord._async_update_data())
+    await asyncio.sleep(0.02)
+    await env.coord._handle_notify(None, LOGIN_SUCCESS_FRAME)  # a LOGIN frame mid measure-wait
+
+    result = await task
+    assert result is not None  # measure timed out -> last data
+    assert env.coord.measurement_count == count_before  # login frame did not complete the measure
+
+
+async def test_stray_login_frame_is_harmless(env):
+    env._set_default(measure_frame())
+    await env.coord._async_update_data()
+    count_before = env.coord.measurement_count
+    login_count_before = env.coord._login_count
+
+    await env.coord._handle_notify(None, LOGIN_SUCCESS_FRAME)  # no login pending
+    assert env.coord._login_count == login_count_before + 1
+    assert env.coord.measurement_count == count_before
