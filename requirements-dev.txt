@@ -3,6 +3,18 @@
 ruff~=0.14.6
 mypy~=1.18.2
 
+# Testing
+pytest~=8.3
+pytest-asyncio~=1.0
+pytest-homeassistant-custom-component~=0.13.293
+
+# Transitive Home Assistant component deps; pinned here for CI reproducibility.
+aiousbwatcher~=1.1
+pyserial~=3.5
+dbus-fast~=5.0
+# aiodns==3.5.0 (pinned by homeassistant) is incompatible with pycares 5.x.
+pycares~=4.11
+
 # Runtime dependencies (needed for type checking and IDE)
 homeassistant~=2025.11.3
 bleak~=2.0.0

@@ -9,3 +9,11 @@ NOTIFY_UUID = "0000fff4-0000-1000-8000-00805f9b34fb"
 
 # Polling interval for sensor updates
 SCAN_INTERVAL = timedelta(seconds=5)
+
+# Kept below SCAN_INTERVAL so each poll resolves before the next is scheduled.
+MEASURE_TIMEOUT = 4.0
+
+# Must exceed the device's worst-case response to the 0x17 login; a shorter value makes every login time out.
+LOGIN_TIMEOUT = 10.0
+
+MAX_MISSED_UPDATES = 3

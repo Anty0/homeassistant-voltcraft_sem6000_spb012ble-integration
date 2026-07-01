@@ -60,3 +60,21 @@ jobs:
 
       - name: Type check with mypy
         run: mypy custom_components/voltcraft_sem6000_spb012ble
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        run: pip install --no-cache-dir -r requirements-dev.txt
+
+      - name: Run tests with pytest
+        run: pytest
