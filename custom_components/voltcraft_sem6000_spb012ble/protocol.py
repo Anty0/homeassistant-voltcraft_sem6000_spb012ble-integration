@@ -22,17 +22,25 @@ MEASURE notification layout:
   Bytes 10+    : consumed_energy (big-endian, Wh)
                  14-byte payload (hw v2): 4 bytes
                  12-byte payload (hw v3): 2 bytes
+
+Accumulated consumption notifications:
+- 0x0A          : last 23 hours
+- 0x0B          : last 30 days
+- 0x0C          : last 12 months
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import IntEnum
+from enum import Enum, IntEnum
 
 
 class Command(IntEnum):
     SWITCH = 0x03
     MEASURE = 0x04
+    CONSUMPTION_DAY = 0x0A
+    CONSUMPTION_MONTH = 0x0B
+    CONSUMPTION_YEAR = 0x0C
 
     def build_payload(self, params: bytearray | None = None) -> bytearray:
         if params is None:
@@ -43,6 +51,14 @@ class Command(IntEnum):
         return bytearray([0x0F, length, self, 0x00]) + params + bytearray([checksum, 0xFF, 0xFF])
 
 
+def expected_message_length(buffer: bytes | bytearray) -> int | None:
+    if len(buffer) < 2:
+        return None
+    if buffer[0] != 0x0F:
+        return None
+    return int(buffer[1]) + 4
+
+
 class SwitchModes(IntEnum):
     ON = 0x01
     OFF = 0x00
@@ -51,11 +67,22 @@ class SwitchModes(IntEnum):
         return Command.SWITCH.build_payload(bytearray([self]))
 
 
+class HistoryKind(Enum):
+    DAY = "day"
+    MONTH = "month"
+    YEAR = "year"
+
+
 class NotifyPayload:
     @staticmethod
     def from_payload(payload: bytearray) -> ParsedNotifyPayload | None:
-        if payload[0] != 0x0F:
+        if len(payload) < 4 or payload[0] != 0x0F:
             # Not a valid payload
+            return None
+
+        expected = expected_message_length(payload)
+        if expected is None or len(payload) < expected:
+            # Incomplete payload
             return None
 
         length = payload[1]
@@ -70,6 +97,10 @@ class NotifyPayload:
         #     # Not a valid payload
         #     return None
 
+        if len(params) < 2:
+            # Not enough data for command + status byte
+            return None
+
         command = params[0]
 
         arguments = params[2:]
@@ -78,6 +109,12 @@ class NotifyPayload:
             return SwitchNotifyPayload.from_data(arguments)
         elif command == Command.MEASURE:
             return MeasureNotifyPayload.from_data(arguments)
+        elif command == Command.CONSUMPTION_DAY:
+            return ConsumptionHistoryNotifyPayload.from_day(arguments)
+        elif command == Command.CONSUMPTION_MONTH:
+            return ConsumptionHistoryNotifyPayload.from_month(arguments)
+        elif command == Command.CONSUMPTION_YEAR:
+            return ConsumptionHistoryNotifyPayload.from_year(arguments)
         else:
             # Unknown command
             return None
@@ -90,19 +127,79 @@ class MeasureNotifyPayload(NotifyPayload):
     voltage: int
     current: int
     frequency: int
-    consumed_energy: int
+    consumed_energy: int | None
 
     @staticmethod
     def from_data(data: bytearray) -> MeasureNotifyPayload:
+        if len(data) < 8:
+            raise ValueError(
+                f"Unexpected MEASURE payload length: {len(data)} bytes ({data.hex()})"
+            )
+
         # data[8:10] are unknown padding bytes — skip them
-        # consumed_energy starts at offset 10; length varies by hw version
+        # 14-byte payloads may contain total consumption at offset 10;
+        # 12-byte payloads do not provide a usable value on affected devices
         return MeasureNotifyPayload(
             is_on=bool(data[0]),
             power=int.from_bytes(data[1:4], byteorder="big"),
             voltage=int(data[4]),
             current=int.from_bytes(data[5:7], byteorder="big"),
             frequency=int(data[7]),
-            consumed_energy=int.from_bytes(data[10:], byteorder="big"),
+            consumed_energy=int.from_bytes(data[10:14], byteorder="big") if len(data) >= 14 else None,
+        )
+
+
+@dataclass(frozen=True)
+class ConsumptionHistoryNotifyPayload(NotifyPayload):
+    kind: HistoryKind
+    values_wh: tuple[int | None, ...]
+
+    @staticmethod
+    def from_day(data: bytearray) -> ConsumptionHistoryNotifyPayload:
+        values: list[int | None] = []
+
+        for offset in range(0, len(data), 2):
+            chunk = data[offset : offset + 2]
+            if len(chunk) == 2:
+                values.insert(0, int.from_bytes(chunk, byteorder="big"))
+
+        return ConsumptionHistoryNotifyPayload(
+            kind=HistoryKind.DAY,
+            values_wh=tuple(values),
+        )
+
+    @staticmethod
+    def from_month(data: bytearray) -> ConsumptionHistoryNotifyPayload:
+        values: list[int | None] = []
+
+        for offset in range(0, len(data), 4):
+            chunk = data[offset : offset + 4]
+            if len(chunk) == 4:
+                values.insert(0, int.from_bytes(chunk[0:3], byteorder="big"))
+
+        # Notification does not contain measurement for today
+        values.insert(0, None)
+
+        return ConsumptionHistoryNotifyPayload(
+            kind=HistoryKind.MONTH,
+            values_wh=tuple(values),
+        )
+
+    @staticmethod
+    def from_year(data: bytearray) -> ConsumptionHistoryNotifyPayload:
+        values: list[int | None] = []
+
+        for offset in range(0, len(data), 4):
+            chunk = data[offset : offset + 4]
+            if len(chunk) == 4:
+                values.insert(0, int.from_bytes(chunk[0:3], byteorder="big"))
+
+        # Notification does not contain measurement for current month
+        values.insert(0, None)
+
+        return ConsumptionHistoryNotifyPayload(
+            kind=HistoryKind.YEAR,
+            values_wh=tuple(values),
         )
 
 
@@ -113,4 +210,8 @@ class SwitchNotifyPayload(NotifyPayload):
         return SwitchNotifyPayload()
 
 
-ParsedNotifyPayload = SwitchNotifyPayload | MeasureNotifyPayload
+ParsedNotifyPayload = (
+    SwitchNotifyPayload
+    | MeasureNotifyPayload
+    | ConsumptionHistoryNotifyPayload
+)

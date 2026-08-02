@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import logging
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, replace
 
 from bleak import BleakClient, BleakGATTCharacteristic
 from bleak.exc import BleakError
-
+from bleak_retry_connector import establish_connection
+from homeassistant.components import bluetooth
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH, DeviceInfo
 from homeassistant.helpers.device_registry import format_mac
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
@@ -14,13 +19,22 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from .const import COMMAND_UUID, DEVICE_NAME, DOMAIN, NOTIFY_UUID, SCAN_INTERVAL
 from .protocol import (
     Command,
+    ConsumptionHistoryNotifyPayload,
+    HistoryKind,
     MeasureNotifyPayload,
     NotifyPayload,
     SwitchModes,
     SwitchNotifyPayload,
+    expected_message_length,
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# Keep all BLE operations shorter than the normal polling interval.
+_BLE_OPERATION_TIMEOUT = 4.0
+_MAX_MISSED_UPDATES = 3
+_HISTORY_POLL_INTERVAL = 300.0
+_HISTORY_RESPONSE_TIMEOUT = 15.0
 
 
 @dataclass
@@ -28,26 +42,31 @@ class VoltcraftData:
     """Data from Voltcraft device measurements."""
 
     is_on: bool
-    power: float  # Watts (converted from mW)
-    voltage: float  # Volts
-    current: float  # Amps (converted from mA)
-    frequency: int  # Hz
-    power_factor: float | None  # 0.0 - 1.0, calculated from P/(V*I)
-    consumed_energy: float  # kWh (converted from Wh)
+    power: float
+    voltage: float
+    current: float
+    frequency: int
+    power_factor: float | None
+    consumed_energy: float | None
 
     @staticmethod
-    def from_payload(payload: MeasureNotifyPayload) -> VoltcraftData:
-        power = payload.power / 1000.0  # mW to W
+    def from_measure_payload(
+        payload: MeasureNotifyPayload,
+        fallback_consumed_energy_kwh: float | None = None,
+    ) -> "VoltcraftData":
+        power = payload.power / 1000.0
         voltage = float(payload.voltage)
-        current = payload.current / 1000.0  # mA to A
+        current = payload.current / 1000.0
 
-        # Power factor - calculate from P / (V * I)
         apparent_power = voltage * current
-        power_factor: float | None
         if apparent_power > 0:
             power_factor = min(power / apparent_power, 1.0)
         else:
             power_factor = None
+
+        consumed_energy = fallback_consumed_energy_kwh
+        if payload.consumed_energy is not None and payload.consumed_energy > 0:
+            consumed_energy = payload.consumed_energy / 1000.0
 
         return VoltcraftData(
             is_on=payload.is_on,
@@ -56,7 +75,7 @@ class VoltcraftData:
             current=current,
             frequency=payload.frequency,
             power_factor=power_factor,
-            consumed_energy=payload.consumed_energy / 1000.0,  # Wh to kWh
+            consumed_energy=consumed_energy,
         )
 
 
@@ -64,20 +83,34 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
     def __init__(
         self,
         hass: HomeAssistant,
-        client: BleakClient,
+        config_entry: ConfigEntry,
         mac: str,
         device_name: str | None,
     ) -> None:
         super().__init__(
             hass,
             _LOGGER,
+            config_entry=config_entry,
             name=f"{DOMAIN}_{mac}",
             update_interval=SCAN_INTERVAL,
         )
-        self.client = client
+        self._mac_address = mac
         self.mac = format_mac(mac)
         self._device_name = device_name
+        self.client: BleakClient | None = None
         self._latest_data: VoltcraftData | None = None
+
+        self._connect_lock = asyncio.Lock()
+        self._operation_lock = asyncio.Lock()
+        self._notify_lock = asyncio.Lock()
+        self._measure_condition = asyncio.Condition()
+        self._measurement_count = 0
+        self._missed_updates = 0
+
+        self._notify_buffer = bytearray()
+        self._year_history_wh: tuple[int | None, ...] | None = None
+        self._last_history_poll = 0.0
+        self._history_request_in_flight = False
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -87,55 +120,279 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
             name=self._device_name or DEVICE_NAME,
         )
 
-    async def async_setup(self) -> None:
-        await self.client.start_notify(NOTIFY_UUID, self._handle_notify)
-
     async def async_shutdown(self) -> None:
+        await super().async_shutdown()
+
+        client = self.client
+        self.client = None
+        self._history_request_in_flight = False
+        self._notify_buffer.clear()
+
+        if client is None:
+            return
+
         try:
-            await self.client.stop_notify(NOTIFY_UUID)
-        except BleakError as err:
+            async with asyncio.timeout(_BLE_OPERATION_TIMEOUT):
+                await client.stop_notify(NOTIFY_UUID)
+        except (TimeoutError, BleakError) as err:
             _LOGGER.debug("Error stopping notifications: %s", err)
 
+        await self._async_safe_disconnect(client, "shutdown")
+
+    def _history_total_kwh(self) -> float | None:
+        if not self._year_history_wh:
+            return None
+
+        values = [value for value in self._year_history_wh if value is not None]
+        if not values:
+            return None
+
+        return sum(values) / 1000.0
+
+    async def _request_year_history(self, client: BleakClient) -> None:
+        self._history_request_in_flight = True
+        self._last_history_poll = time.monotonic()
+
         try:
-            await self.client.disconnect()
-        except BleakError as err:
-            _LOGGER.debug("Error disconnecting client: %s", err)
+            # Small delay after MEASURE to reduce collisions between responses.
+            await asyncio.sleep(0.1)
+            async with asyncio.timeout(_BLE_OPERATION_TIMEOUT):
+                async with self._operation_lock:
+                    await client.write_gatt_char(
+                        COMMAND_UUID,
+                        Command.CONSUMPTION_YEAR.build_payload(
+                            bytearray([0x00, 0x00])
+                        ),
+                    )
+        except (TimeoutError, BleakError):
+            self._history_request_in_flight = False
+            raise
 
     async def _async_update_data(self) -> VoltcraftData | None:
-        """Fetch data from the device.
+        """Fetch a fresh measurement and periodically refresh energy history."""
 
-        This sends a measure command and returns the latest data.
-        The actual data update happens asynchronously via a notification handler.
-        """
+        client = await self._async_ensure_connected()
+        start_count = self._measurement_count
 
         try:
-            await self.client.write_gatt_char(COMMAND_UUID, Command.MEASURE.build_payload())
-        except BleakError as err:
-            raise UpdateFailed(f"Failed to send measure command: {err}") from err
+            async with asyncio.timeout(_BLE_OPERATION_TIMEOUT):
+                async with self._operation_lock:
+                    await client.write_gatt_char(
+                        COMMAND_UUID,
+                        Command.MEASURE.build_payload(),
+                    )
 
-        return self._latest_data
+                async with self._measure_condition:
+                    await self._measure_condition.wait_for(
+                        lambda: self._measurement_count != start_count
+                    )
+        except (TimeoutError, BleakError) as err:
+            self._missed_updates += 1
 
-    async def _handle_notify(self, sender: BleakGATTCharacteristic, data: bytearray) -> None:
-        """Handle notifications from the device."""
-        _LOGGER.debug("Received notification: %s", data.hex())
-        payload = NotifyPayload.from_payload(data)
+            if self.data is None or self._missed_updates >= _MAX_MISSED_UPDATES:
+                await self._async_teardown()
+                raise UpdateFailed(f"No measurement received: {err}") from err
 
-        match payload:
-            case MeasureNotifyPayload():
-                self._latest_data = VoltcraftData.from_payload(payload)
-                self.async_set_updated_data(self._latest_data)
+            # Preserve the last valid reading for two isolated missed responses.
+            return self.data
 
-            case SwitchNotifyPayload():
-                # Switch state changed, trigger immediate measure to update data
-                self.hass.create_task(self.async_request_refresh())
+        now = time.monotonic()
+        if (
+            self._history_request_in_flight
+            and now - self._last_history_poll >= _HISTORY_RESPONSE_TIMEOUT
+        ):
+            _LOGGER.debug("Timed out waiting for consumption-history response")
+            self._history_request_in_flight = False
 
-            case None:
-                _LOGGER.warning("Unknown payload received: %s", data.hex())
+        if (
+            now - self._last_history_poll >= _HISTORY_POLL_INTERVAL
+            and not self._history_request_in_flight
+        ):
+            try:
+                await self._request_year_history(client)
+            except (TimeoutError, BleakError) as err:
+                # The live measurement is valid. Drop the suspect connection and
+                # reconnect on the next poll without discarding that measurement.
+                _LOGGER.debug("Failed to request consumption history: %s", err)
+                await self._async_teardown()
+
+        return self.data
+
+    async def _handle_notify(
+        self,
+        sender: BleakGATTCharacteristic,
+        data: bytearray,
+    ) -> None:
+        """Handle complete or fragmented notifications from the device."""
+
+        _LOGGER.debug("Received notification fragment: %s", data.hex())
+
+        async with self._notify_lock:
+            self._notify_buffer.extend(data)
+
+            while True:
+                if len(self._notify_buffer) < 2:
+                    return
+
+                if self._notify_buffer[0] != 0x0F:
+                    next_frame = self._notify_buffer.find(0x0F, 1)
+                    if next_frame == -1:
+                        _LOGGER.debug(
+                            "Dropping stray notification data: %s",
+                            self._notify_buffer.hex(),
+                        )
+                        self._notify_buffer.clear()
+                        return
+
+                    _LOGGER.debug(
+                        "Dropping stray notification prefix: %s",
+                        self._notify_buffer[:next_frame].hex(),
+                    )
+                    del self._notify_buffer[:next_frame]
+                    continue
+
+                expected = expected_message_length(self._notify_buffer)
+                if expected is None or len(self._notify_buffer) < expected:
+                    return
+
+                frame = bytearray(self._notify_buffer[:expected])
+                del self._notify_buffer[:expected]
+
+                try:
+                    payload = NotifyPayload.from_payload(frame)
+                except ValueError as err:
+                    self._history_request_in_flight = False
+                    _LOGGER.warning(
+                        "Invalid notification payload %s: %s",
+                        frame.hex(),
+                        err,
+                    )
+                    continue
+
+                match payload:
+                    case MeasureNotifyPayload():
+                        self._missed_updates = 0
+                        self._measurement_count += 1
+                        self._latest_data = VoltcraftData.from_measure_payload(
+                            payload,
+                            fallback_consumed_energy_kwh=self._history_total_kwh(),
+                        )
+                        self.async_set_updated_data(self._latest_data)
+
+                        async with self._measure_condition:
+                            self._measure_condition.notify_all()
+
+                    case ConsumptionHistoryNotifyPayload(kind=HistoryKind.YEAR):
+                        self._history_request_in_flight = False
+                        self._year_history_wh = payload.values_wh
+
+                        if self._latest_data is not None:
+                            self._latest_data = replace(
+                                self._latest_data,
+                                consumed_energy=self._history_total_kwh(),
+                            )
+                            self.async_set_updated_data(self._latest_data)
+
+                    case ConsumptionHistoryNotifyPayload():
+                        self._history_request_in_flight = False
+
+                    case SwitchNotifyPayload():
+                        self.hass.async_create_task(self.async_request_refresh())
+
+                    case None:
+                        self._history_request_in_flight = False
+                        _LOGGER.warning("Unknown payload received: %s", frame.hex())
 
     async def async_send_switch_command(self, mode: SwitchModes) -> None:
         """Send a switch command to the device."""
+
         try:
-            await self.client.write_gatt_char(COMMAND_UUID, mode.build_payload())
-        except BleakError as err:
+            client = await self._async_ensure_connected()
+            async with asyncio.timeout(_BLE_OPERATION_TIMEOUT):
+                async with self._operation_lock:
+                    await client.write_gatt_char(
+                        COMMAND_UUID,
+                        mode.build_payload(),
+                    )
+        except (TimeoutError, BleakError, UpdateFailed) as err:
+            await self._async_teardown()
             _LOGGER.error("Failed to send switch command: %s", err)
-            raise
+            raise HomeAssistantError(
+                f"Failed to send switch command: {err}"
+            ) from err
+
+    async def _async_ensure_connected(self) -> BleakClient:
+        client = self.client
+        if client is not None and client.is_connected:
+            return client
+
+        async with self._connect_lock:
+            client = self.client
+            if client is not None and client.is_connected:
+                return client
+
+            if client is not None:
+                await self._async_safe_disconnect(client, "replace stale client")
+                if self.client is client:
+                    self.client = None
+
+            ble_device = bluetooth.async_ble_device_from_address(
+                self.hass,
+                self._mac_address,
+                connectable=True,
+            )
+            if ble_device is None:
+                raise UpdateFailed(f"Device {self._mac_address} not found")
+
+            new_client: BleakClient | None = None
+            try:
+                new_client = await establish_connection(
+                    BleakClient,
+                    ble_device,
+                    self.name,
+                )
+                self._notify_buffer.clear()
+                async with asyncio.timeout(_BLE_OPERATION_TIMEOUT):
+                    await new_client.start_notify(NOTIFY_UUID, self._handle_notify)
+            except (TimeoutError, BleakError) as err:
+                if new_client is not None:
+                    await self._async_safe_disconnect(
+                        new_client,
+                        "after failed connect",
+                    )
+                raise UpdateFailed(
+                    f"Failed to connect to {self._mac_address}: {err}"
+                ) from err
+
+            self.client = new_client
+            self._missed_updates = 0
+            self._history_request_in_flight = False
+            self._last_history_poll = 0.0
+            return new_client
+
+    async def _async_teardown(self) -> None:
+        """Drop the connection so the next update creates a fresh one."""
+
+        client = self.client
+        if client is None:
+            return
+
+        await self._async_safe_disconnect(client, "teardown")
+
+        # Do not erase a client installed by a concurrent reconnect.
+        if self.client is client:
+            self.client = None
+
+        self._history_request_in_flight = False
+        self._notify_buffer.clear()
+
+    async def _async_safe_disconnect(
+        self,
+        client: BleakClient,
+        context: str,
+    ) -> None:
+        try:
+            async with asyncio.timeout(_BLE_OPERATION_TIMEOUT):
+                await client.disconnect()
+        except (TimeoutError, BleakError) as err:
+            _LOGGER.debug("Error disconnecting client (%s): %s", context, err)
