@@ -3,7 +3,13 @@
     "step": {
       "confirm": {
         "title": "Set up {name}",
-        "description": "Add this Voltcraft SEM6000 / SPB012BLE?"
+        "description": "Add this Voltcraft SEM6000 / SPB012BLE and authenticate with its four-digit device PIN?",
+        "data": {
+          "pin": "Four-digit PIN"
+        },
+        "data_description": {
+          "pin": "The factory default is 0000. The value is masked in the form."
+        }
       },
       "user": {
         "title": "Select device",
@@ -11,6 +17,9 @@
           "mac": "Device"
         }
       }
+    },
+    "error": {
+      "invalid_pin": "The PIN must contain exactly four decimal digits."
     },
     "abort": {
       "already_configured": "This device is already configured.",
@@ -21,10 +30,17 @@
     "step": {
       "init": {
         "title": "Device authentication",
+        "description": "Update only the PIN Home Assistant uses to log in. Leave the field empty to keep the stored PIN. Use the Change PIN action to change the PIN on the plug itself.",
         "data": {
           "pin": "Four-digit PIN"
+        },
+        "data_description": {
+          "pin": "The existing PIN is never returned to the browser."
         }
       }
+    },
+    "error": {
+      "invalid_pin": "The PIN must contain exactly four decimal digits."
     }
   }
 }

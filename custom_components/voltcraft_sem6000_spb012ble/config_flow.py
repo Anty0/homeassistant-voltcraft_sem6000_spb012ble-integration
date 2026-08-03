@@ -4,16 +4,28 @@ from typing import Any
 
 import voluptuous as vol
 
-from homeassistant.components import onboarding
 from homeassistant.components.bluetooth import (
     BluetoothServiceInfoBleak,
     async_discovered_service_info,
 )
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult, OptionsFlow
+from homeassistant.config_entries import (
+    ConfigEntry,
+    ConfigFlow,
+    ConfigFlowResult,
+    OptionsFlow,
+)
 from homeassistant.const import CONF_MAC
 from homeassistant.helpers.device_registry import format_mac
+from homeassistant.helpers.selector import (
+    TextSelector,
+    TextSelectorConfig,
+    TextSelectorType,
+)
 
 from .const import CONF_PIN, DEFAULT_PIN, DEVICE_NAME, DOMAIN, SERVICE_UUID
+from .protocol import normalize_pin
+
+_PIN_SELECTOR = TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD))
 
 
 class VoltcraftConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -35,11 +47,22 @@ class VoltcraftConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_confirm(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        if user_input is not None or not onboarding.async_is_onboarded(self.hass):
-            return self._create_entry()
-        self._set_confirm_only()
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            try:
+                pin = normalize_pin(user_input[CONF_PIN])
+            except (KeyError, ValueError):
+                errors["base"] = "invalid_pin"
+            else:
+                return self._create_entry(pin)
+
         return self.async_show_form(
-            step_id="confirm", description_placeholders={"name": self._name}
+            step_id="confirm",
+            data_schema=vol.Schema(
+                {vol.Required(CONF_PIN, default=DEFAULT_PIN): _PIN_SELECTOR}
+            ),
+            errors=errors,
+            description_placeholders={"name": self._name},
         )
 
     async def async_step_user(
@@ -63,8 +86,10 @@ class VoltcraftConfigFlow(ConfigFlow, domain=DOMAIN):
                 self._discovered_devices[discovery.address] = (
                     f"{discovery.name} ({discovery.address})"
                 )
+
         if not self._discovered_devices:
             return self.async_abort(reason="no_devices_found")
+
         return self.async_show_form(
             step_id="user",
             data_schema=vol.Schema(
@@ -73,7 +98,7 @@ class VoltcraftConfigFlow(ConfigFlow, domain=DOMAIN):
         )
 
     @staticmethod
-    def async_get_options_flow(config_entry) -> OptionsFlow:
+    def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:
         return VoltcraftOptionsFlow()
 
     @property
@@ -84,10 +109,10 @@ class VoltcraftConfigFlow(ConfigFlow, domain=DOMAIN):
     def _name(self, value: str | None) -> None:
         self.context["title_placeholders"] = {"name": value or DEVICE_NAME}
 
-    def _create_entry(self) -> ConfigFlowResult:
+    def _create_entry(self, pin: str) -> ConfigFlowResult:
         return self.async_create_entry(
             title=self._name,
-            data={CONF_MAC: self._mac_address, CONF_PIN: DEFAULT_PIN},
+            data={CONF_MAC: self._mac_address, CONF_PIN: pin},
         )
 
 
@@ -95,18 +120,24 @@ class VoltcraftOptionsFlow(OptionsFlow):
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
+        errors: dict[str, str] = {}
         if user_input is not None:
-            return self.async_create_entry(title="", data=user_input)
-        current_pin = self.config_entry.options.get(
-            CONF_PIN, self.config_entry.data.get(CONF_PIN, DEFAULT_PIN)
-        )
+            updated_options = dict(self.config_entry.options)
+            entered_pin = str(user_input.get(CONF_PIN, "")).strip()
+            if entered_pin:
+                try:
+                    updated_options[CONF_PIN] = normalize_pin(entered_pin)
+                except ValueError:
+                    errors["base"] = "invalid_pin"
+                else:
+                    return self.async_create_entry(title="", data=updated_options)
+            else:
+                # A blank password field deliberately leaves the stored PIN
+                # untouched and never sends it back to the browser.
+                return self.async_create_entry(title="", data=updated_options)
+
         return self.async_show_form(
             step_id="init",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(CONF_PIN, default=current_pin): vol.All(
-                        str, vol.Match(r"^\d{4}$")
-                    )
-                }
-            ),
+            data_schema=vol.Schema({vol.Optional(CONF_PIN): _PIN_SELECTOR}),
+            errors=errors,
         )
