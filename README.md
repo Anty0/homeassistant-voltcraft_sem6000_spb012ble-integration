@@ -1,143 +1,149 @@
 # Voltcraft SEM6000 / SPB012BLE Integration for Home Assistant
 
-[![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/custom-components/hacs)
 
-A Home Assistant custom component integration for **Voltcraft SEM6000** and **SPB012BLE** Bluetooth Low Energy (BLE) smart power plugs.
+An extended, independently maintained Home Assistant custom integration for the
+**Voltcraft SEM6000** and protocol-compatible **SPB012BLE** Bluetooth Low Energy
+power plugs.
 
-## Currently Supported
+> [!IMPORTANT]
+> This repository is an independently maintained fork of
+> [Anty0/homeassistant-voltcraft_sem6000_spb012ble-integration](https://github.com/Anty0/homeassistant-voltcraft_sem6000_spb012ble-integration).
+> It retains the original Git history, license and attribution, but releases and
+> issue handling for this extended version are maintained here.
 
-- Turn outlet on/off
-- Monitor outlet state (on/off)
-- Automatic Discovery
-- Real-time sensor monitoring (updated every 5 seconds):
-  - Power consumption (Watts)
-  - Voltage (Volts)
-  - Current (Amperes)
-  - Frequency (Hz)
-  - Power factor (0.0-1.0)
-  - Total consumed energy (kWh)
+## Project status
 
-## Missing Capabilities
+The current release line is **2.0.0 beta**. It contains a substantially expanded
+protocol implementation and should be treated as a prerelease until it has been
+validated on more devices and Bluetooth environments.
 
-The device supports additional features (commands), which I don't plan to support (but PRs are welcome!):
-- Time sync (needed for scheduled power on/off)
-- Schedule power on/off (use Home Assistant automations instead)
-- Get/set device name
-- Set the power limit (called Power Protection in the app)
-- Power consumption history (Home Assistant will already collect power consumption data by itself)
-- Password protection
-- Calibration
-- Firmware update
+Development and testing are primarily performed with a Voltcraft SEM6000.
+SPB012BLE support is inherited from the upstream integration and is currently
+best effort; reports from SPB012BLE users are welcome.
+
+## Features
+
+### Outlet control and live measurements
+
+- Automatic Bluetooth discovery and UI-based setup
+- Outlet on/off control and state reporting
+- Power, voltage, current and frequency
+- Calculated power factor
+- Persistent total-energy reading from the device
+- Automatic recovery after temporary disconnects or power loss
+
+### Device settings
+
+- Automatic device-time synchronization after an authenticated connection
+- Device name
+- Four-digit device PIN authentication
+- Night mode / LED ring control
+- Over-power limit from 1 to 4000 W
+- Over-power protection enable/disable control
+- Normal and reduced electricity tariffs
+- Reduced-tariff start and end times
+
+### Timers, schedules and random mode
+
+- Countdown timer read, start and stop operations
+- Read, add, edit and remove device schedules
+- Random mode enable/disable control
+- Random-mode start and end times
+- Individual weekday switches for random mode
+
+### History and diagnostics
+
+- Total energy suitable for Home Assistant long-term statistics
+- Device energy history for the last 24 hours, 30 days and 12 months
+- Device serial number, vendor, firmware and hardware information
+- BLE connection mode and negotiated ATT MTU
+- Diagnostics for the app-compatible initialization sequence
+
+Some history and diagnostic entities are disabled by default and can be enabled
+from the Home Assistant entity registry when needed.
+
+## Known limitations
+
+- The integration is still a prerelease and has mainly been tested with one
+  SEM6000 hardware environment.
+- The tested SEM6000 settings response does not reliably report the current
+  over-power-protection state. The integration therefore preserves the last
+  command-confirmed state instead of forcing the switch back to off.
+- Calibration and firmware updates are not implemented.
+- The official Voltcraft app and Home Assistant should not control the plug at
+  the same time because the device normally accepts only one active BLE client.
 
 ## Requirements
 
-### Hardware
-
-- A Bluetooth adapter for your Home Assistant
-- Voltcraft SEM6000 or SPB012BLE smart power plug
-
-### Software
-
-- Home Assistant
-- Bluetooth integration enabled
-- HACS (Recommended)
+- Home Assistant with the Bluetooth integration enabled
+- A local Bluetooth adapter or a supported Bluetooth proxy
+- Voltcraft SEM6000 or compatible SPB012BLE power plug
+- HACS for the recommended installation method
 
 ## Installation
 
-### HACS Installation (Recommended)
+### HACS custom repository
 
-1. Open HACS in your Home Assistant instance
-2. Click on **Integrations**
-3. Click the three dots in the top right corner and select **Custom repositories**
-4. Add this repository URL: `https://github.com/Anty0/homeassistant-voltcraft_sem6000_spb012ble-integration`
-5. Select **Integration** as the category
-6. Click **Add**
-7. Find "Voltcraft SEM6000 / SPB012BLE" in the integration list and click **Download**
-8. Restart Home Assistant
+1. Open HACS in Home Assistant.
+2. Add the following repository as a custom **Integration** repository:
 
-### Manual Installation
-
-1. Download the latest release from this repository
-2. Copy the `custom_components/voltcraft_sem6000_spb012ble` directory to your Home Assistant's `custom_components` directory:
+   ```text
+   https://github.com/citizenserious/homeassistant-voltcraft_sem6000_spb012ble-integration
    ```
-   <config_directory>/custom_components/voltcraft_sem6000_spb012ble/
+
+3. Install **Voltcraft SEM6000 / SPB012BLE**.
+4. Select the prerelease version when installing a beta release.
+5. Restart Home Assistant.
+6. Open **Settings -> Devices & services** and configure the discovered plug.
+
+### Manual installation
+
+1. Download the desired release archive.
+2. Copy the directory below into the Home Assistant configuration directory:
+
+   ```text
+   custom_components/voltcraft_sem6000_spb012ble/
    ```
-   If the `custom_components` directory doesn't exist, create it first.
-3. Restart Home Assistant
 
-## Configuration
+3. Restart Home Assistant.
+4. Configure the integration through **Settings -> Devices & services**.
 
-### Device Discovery
+## Migrating from the upstream integration
 
-The Home Assistant should automatically discover Voltcraft SEM6000 and SPB012BLE devices via Bluetooth. Make sure:
-- Bluetooth integration is enabled
-- The device is powered on
-- The device is within Bluetooth range of your Home Assistant host
+This fork deliberately keeps the same Home Assistant integration domain:
 
-If the device is found, it will appear in the integration list under **Devices & Services**, where you can configure it.
+```text
+voltcraft_sem6000_spb012ble
+```
 
-### Setup via UI
+The upstream integration and this fork therefore **cannot be installed in
+parallel**.
 
-1. Ensure your Voltcraft SEM6000 / SPB012BLE device is powered on and within Bluetooth range
-2. In Home Assistant, go to **Settings** → **Devices & Services**
-3. Click **+ Add Integration**
-4. Search for "Voltcraft SEM6000 / SPB012BLE"
-5. Select your device from the list of discovered Bluetooth devices
-6. Confirm the device selection
-7. The integration will create a switch entity for your power plug
+Before migrating, create a Home Assistant backup. Then replace the upstream HACS
+custom-repository entry with this repository, install the selected release and
+restart Home Assistant. Do not remove the configured Home Assistant integration
+unless normal replacement fails, because removing it can also remove registry
+entries and entity customizations.
 
-## Entities
+The migration path has not yet been validated across every upstream version.
+Check entity IDs, automations and the Energy dashboard after the first restart.
 
-Once configured, the integration creates the following entities:
+## Configuration and PIN
 
-### Switch Entity
+The integration is configured through the Home Assistant UI. Devices using the
+default or a custom four-digit PIN are authenticated during connection setup.
+The PIN must contain exactly four decimal digits.
 
-- **Entity ID**: `switch.[device_mac_address]`
-- **Device Class**: Outlet
-- **Attributes**:
-  - `is_on`: Current state of the outlet (true/false)
-- **Services**:
-  - `switch.turn_on`: Turn the outlet on
-  - `switch.turn_off`: Turn the outlet off
-  - `switch.toggle`: Toggle the outlet state
+## Services and advanced functions
 
-### Sensor Entities
+Timer and schedule operations are exposed through integration services. Their
+current state is also available through the Timer and Schedules entities. Use
+Home Assistant's **Developer tools -> Actions** view to inspect the available
+fields and target the correct Voltcraft device.
 
-All sensor values are updated every 5 seconds:
+## Debug logging
 
-- **Power** (`sensor.[device_mac_address]_power`)
-  - Current power consumption in Watts (W)
-  - Device Class: Power
-  - State Class: Measurement
-
-- **Voltage** (`sensor.[device_mac_address]_voltage`)
-  - Line voltage in Volts (V)
-  - Device Class: Voltage
-  - State Class: Measurement
-
-- **Current** (`sensor.[device_mac_address]_current`)
-  - Current draw in Amperes (A)
-  - Device Class: Current
-  - State Class: Measurement
-
-- **Frequency** (`sensor.[device_mac_address]_frequency`)
-  - Line frequency in Hertz (Hz)
-  - Device Class: Frequency
-  - State Class: Measurement
-
-- **Power Factor** (`sensor.[device_mac_address]_power_factor`)
-  - Power factor (0.0-1.0, dimensionless)
-  - Device Class: Power Factor
-  - State Class: Measurement
-
-- **Total Energy** (`sensor.[device_mac_address]_energy`)
-  - Cumulative energy consumption in kilowatt-hours (kWh)
-  - Device Class: Energy
-  - State Class: Total Increasing
-
-## Enable Debug Logging
-
-To enable debug logging for troubleshooting, add the following to your `configuration.yaml`:
+Add the following to `configuration.yaml` and restart Home Assistant:
 
 ```yaml
 logger:
@@ -146,25 +152,49 @@ logger:
     custom_components.voltcraft_sem6000_spb012ble: debug
 ```
 
-Then restart Home Assistant.
+Downloaded Home Assistant logs can contain unrelated integration data, hostnames,
+usernames and device identifiers. Review and redact complete logs before posting
+them publicly.
+
+## Reporting issues
+
+When reporting a problem, include:
+
+- Integration version
+- Home Assistant Core version
+- Device model, hardware version and firmware version when available
+- Bluetooth path used: local adapter or proxy
+- Relevant debug log section with private data removed
+- Exact action that triggered the problem
+
+Please report issues in this repository, not in the upstream repository, when
+they concern features or releases provided only by this fork.
+
+## Upstream relationship and credits
+
+This project is based on the work by **Jiri Kuchynka (Anty)** in the original
+integration. The original Git history and MIT license are retained.
+
+The SEM6000 protocol implementation also builds on publicly available reverse
+engineering and additional Android Bluetooth HCI captures used during development
+of this fork.
+
+Useful prior protocol work:
+
+- [amasson/hass-voltcraft-sem6000](https://gitlab.youmi-lausanne.ch/amasson/hass-voltcraft-sem6000)
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request or open an issue for:
-- Bug reports
-- Feature requests
-- Protocol improvements
-- Code enhancements
-
-## Credits
-
-- Protocol reverse-engineered by monitoring the official Android app and ravaging through other public repositories
-- Inspiration taken from [here](https://codeberg.org/ldb/spb012ble) and [here](https://gitlab.youmi-lausanne.ch/amasson/hass-voltcraft-sem6000)
+Bug reports, protocol captures, device-compatibility reports and focused pull
+requests are welcome. Changes should preserve existing entity unique IDs unless
+a documented migration is provided.
 
 ## License
 
-This project is licensed under the MIT License—see the LICENSE file for details.
+Licensed under the MIT License. See [LICENSE](LICENSE).
 
 ## Disclaimer
 
-This is an unofficial integration and is not affiliated with or endorsed by Voltcraft or the device manufacturers. Use at your own risk.
+This is an unofficial community integration. It is not affiliated with or
+endorsed by Voltcraft or the device manufacturer. Device-control and protection
+functions should be tested with a non-critical load before relying on them.
