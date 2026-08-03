@@ -1,18 +1,14 @@
 from __future__ import annotations
 
-from homeassistant.components.number import NumberDeviceClass, NumberEntity, NumberMode
+from homeassistant.components.number import NumberEntity, NumberMode
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import UnitOfPower
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity import EntityCategory
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import VoltcraftDataUpdateCoordinator
-
-_MIN_POWER_LIMIT_W = 1
-_MAX_POWER_LIMIT_W = 3680
+from .entity import VoltcraftCoordinatorEntity
 
 
 async def async_setup_entry(
@@ -21,35 +17,88 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     coordinator: VoltcraftDataUpdateCoordinator = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities([VoltcraftOverpowerLimitNumber(coordinator)])
+    async_add_entities(
+        [
+            VoltcraftPowerLimitNumber(coordinator),
+            VoltcraftNormalTariffNumber(coordinator),
+            VoltcraftReducedTariffNumber(coordinator),
+        ]
+    )
 
 
-class VoltcraftOverpowerLimitNumber(
-    CoordinatorEntity[VoltcraftDataUpdateCoordinator], NumberEntity
-):
-    """Configure the device-side overpower threshold."""
-
-    _attr_device_class = NumberDeviceClass.POWER
-    _attr_entity_category = EntityCategory.CONFIG
+class VoltcraftNumber(VoltcraftCoordinatorEntity, NumberEntity):
     _attr_mode = NumberMode.BOX
-    _attr_native_min_value = _MIN_POWER_LIMIT_W
-    _attr_native_max_value = _MAX_POWER_LIMIT_W
+
+
+class VoltcraftPowerLimitNumber(VoltcraftNumber):
+    _attr_name = "Over-power limit"
+    _attr_icon = "mdi:flash-alert"
+    _attr_native_min_value = 1
+    _attr_native_max_value = 4000
     _attr_native_step = 1
-    _attr_native_unit_of_measurement = UnitOfPower.WATT
+    _attr_native_unit_of_measurement = "W"
 
     def __init__(self, coordinator: VoltcraftDataUpdateCoordinator) -> None:
         super().__init__(coordinator)
-        self._attr_unique_id = f"{coordinator.mac}_overpower_limit"
-        self._attr_name = "Overpower limit"
-        self._attr_device_info = coordinator.device_info
+        self._attr_unique_id = f"{coordinator.mac}_power_limit"
 
     @property
-    def available(self) -> bool:
-        return super().available and self.coordinator.power_limit_w is not None
-
-    @property
-    def native_value(self) -> int | None:
-        return self.coordinator.power_limit_w
+    def native_value(self) -> float | None:
+        data = self.coordinator.data
+        return float(data.power_limit_watts) if data and data.power_limit_watts is not None else None
 
     async def async_set_native_value(self, value: float) -> None:
         await self.coordinator.async_set_power_limit(round(value))
+
+
+class VoltcraftTariffNumber(VoltcraftNumber):
+    _attr_native_min_value = 0
+    _attr_native_max_value = 2.55
+    _attr_native_step = 0.01
+    _attr_native_unit_of_measurement = "€/kWh"
+
+    async def _set_prices(self, normal: float | None, reduced: float | None) -> None:
+        data = self.coordinator.data
+        if data is None or data.normal_tariff is None or data.reduced_tariff is None:
+            await self.coordinator.async_refresh_settings()
+            data = self.coordinator.data
+        if data is None or data.normal_tariff is None or data.reduced_tariff is None:
+            raise HomeAssistantError("Tariff settings are not available")
+        await self.coordinator.async_set_prices(
+            data.normal_tariff if normal is None else normal,
+            data.reduced_tariff if reduced is None else reduced,
+        )
+
+
+class VoltcraftNormalTariffNumber(VoltcraftTariffNumber):
+    _attr_name = "Tariff 1 - Normal price"
+    _attr_icon = "mdi:currency-eur"
+
+    def __init__(self, coordinator: VoltcraftDataUpdateCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.mac}_normal_tariff"
+
+    @property
+    def native_value(self) -> float | None:
+        data = self.coordinator.data
+        return data.normal_tariff if data else None
+
+    async def async_set_native_value(self, value: float) -> None:
+        await self._set_prices(value, None)
+
+
+class VoltcraftReducedTariffNumber(VoltcraftTariffNumber):
+    _attr_name = "Tariff 2 - Reduced price"
+    _attr_icon = "mdi:currency-eur-off"
+
+    def __init__(self, coordinator: VoltcraftDataUpdateCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.mac}_reduced_tariff"
+
+    @property
+    def native_value(self) -> float | None:
+        data = self.coordinator.data
+        return data.reduced_tariff if data else None
+
+    async def async_set_native_value(self, value: float) -> None:
+        await self._set_prices(None, value)
