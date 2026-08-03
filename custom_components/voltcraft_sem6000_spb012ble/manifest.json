@@ -7,7 +7,6 @@
     }
   ],
   "codeowners": [
-    "@Anty0",
     "@citizenserious"
   ],
   "config_flow": true,
