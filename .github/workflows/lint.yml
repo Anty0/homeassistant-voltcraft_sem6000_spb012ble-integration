@@ -1,4 +1,4 @@
-name: Lint
+name: Changed-file checks
 
 on:
   push:
@@ -6,57 +6,96 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   format-check:
-    name: Format Check
+    name: Ruff format check
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # pinned commit
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # pinned commit
         with:
-          python-version: '3.13'
+          python-version: "3.14"
 
-      - name: Install dependencies
+      - name: Install Ruff
         run: pip install --no-cache-dir -r requirements-dev.txt
 
-      - name: Check formatting with ruff
-        run: ruff format --check .
+      - name: Check formatting of changed Python files
+        run: >-
+          ruff format --check
+          custom_components/voltcraft_sem6000_spb012ble/__init__.py
+          custom_components/voltcraft_sem6000_spb012ble/config_flow.py
+          custom_components/voltcraft_sem6000_spb012ble/protocol.py
+          custom_components/voltcraft_sem6000_spb012ble/security.py
+          tests
 
   lint:
-    name: Lint
+    name: Ruff lint
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # pinned commit
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # pinned commit
         with:
-          python-version: '3.13'
+          python-version: "3.14"
 
-      - name: Install dependencies
+      - name: Install Ruff
         run: pip install --no-cache-dir -r requirements-dev.txt
 
-      - name: Lint with ruff
-        run: ruff check .
+      - name: Lint changed Python files
+        run: >-
+          ruff check
+          custom_components/voltcraft_sem6000_spb012ble/__init__.py
+          custom_components/voltcraft_sem6000_spb012ble/config_flow.py
+          custom_components/voltcraft_sem6000_spb012ble/protocol.py
+          custom_components/voltcraft_sem6000_spb012ble/security.py
+          tests
 
   type-check:
-    name: Type Check
+    name: Protocol type check
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # pinned commit
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # pinned commit
         with:
-          python-version: '3.13'
+          python-version: "3.14"
 
-      - name: Install dependencies
+      - name: Install mypy
         run: pip install --no-cache-dir -r requirements-dev.txt
 
-      - name: Type check with mypy
-        run: mypy custom_components/voltcraft_sem6000_spb012ble
+      - name: Type check the pure protocol module
+        run: mypy custom_components/voltcraft_sem6000_spb012ble/protocol.py
+
+  protocol-tests:
+    name: Protocol security tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # pinned commit
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # pinned commit
+        with:
+          python-version: "3.14"
+
+      - name: Compile changed Python files
+        run: >-
+          python -m compileall -q
+          custom_components/voltcraft_sem6000_spb012ble/__init__.py
+          custom_components/voltcraft_sem6000_spb012ble/config_flow.py
+          custom_components/voltcraft_sem6000_spb012ble/protocol.py
+          custom_components/voltcraft_sem6000_spb012ble/security.py
+          tests
+
+      - name: Run regression tests
+        run: python -m unittest discover -s tests -p "test_*.py"
