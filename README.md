@@ -170,6 +170,10 @@ When reporting a problem, include:
 Please report issues in this repository, not in the upstream repository, when
 they concern features or releases provided only by this fork.
 
+## AI-assisted development
+
+Development of this fork was assisted by generative AI tools for code analysis, implementation, debugging and documentation. All changes were reviewed, adapted and tested by the maintainer. Responsibility for the code, releases and project maintenance remains with the maintainer.
+
 ## Upstream relationship and credits
 
 This project is based on the work by **Jiri Kuchynka (Anty)** in the original
