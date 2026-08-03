@@ -1,0 +1,30 @@
+{
+  "config": {
+    "step": {
+      "confirm": {
+        "title": "{name} einrichten",
+        "description": "Dieses Voltcraft SEM6000 / SPB012BLE hinzufügen?"
+      },
+      "user": {
+        "title": "Gerät auswählen",
+        "data": {
+          "mac": "Gerät"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "Dieses Gerät ist bereits eingerichtet.",
+      "no_devices_found": "Kein verbindbares Voltcraft-Gerät gefunden."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Geräteauthentifizierung",
+        "data": {
+          "pin": "Vierstellige PIN"
+        }
+      }
+    }
+  }
+}
