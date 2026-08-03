@@ -44,3 +44,5 @@ Still pending in the GitHub pull request or on real hardware:
 
 Do not publish this build as a prerelease until the GitHub checks and the separate
 Home Assistant/BLE test checklist pass.
+
+Hardware validation pending.
