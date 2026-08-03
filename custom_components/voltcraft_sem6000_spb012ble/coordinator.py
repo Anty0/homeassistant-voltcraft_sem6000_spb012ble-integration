@@ -23,6 +23,8 @@ from .protocol import (
     HistoryKind,
     MeasureNotifyPayload,
     NotifyPayload,
+    SetPowerLimitNotifyPayload,
+    SettingsNotifyPayload,
     SwitchModes,
     SwitchNotifyPayload,
     expected_message_length,
@@ -35,6 +37,9 @@ _BLE_OPERATION_TIMEOUT = 4.0
 _MAX_MISSED_UPDATES = 3
 _HISTORY_POLL_INTERVAL = 300.0
 _HISTORY_RESPONSE_TIMEOUT = 15.0
+_SETTINGS_RESPONSE_TIMEOUT = 15.0
+_MIN_POWER_LIMIT_W = 1
+_MAX_POWER_LIMIT_W = 3680
 
 
 @dataclass
@@ -107,10 +112,24 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
         self._measurement_count = 0
         self._missed_updates = 0
 
+        self._power_limit_condition = asyncio.Condition()
+        self._power_limit_ack_count = 0
+        self._last_power_limit_set_success: bool | None = None
+
         self._notify_buffer = bytearray()
         self._year_history_wh: tuple[int | None, ...] | None = None
         self._last_history_poll = 0.0
         self._history_request_in_flight = False
+
+        self._power_limit_w: int | None = None
+        self._settings_request_in_flight = False
+        self._last_settings_request = 0.0
+
+    @property
+    def power_limit_w(self) -> int | None:
+        """Return the power limit stored by the device."""
+
+        return self._power_limit_w
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -126,6 +145,7 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
         client = self.client
         self.client = None
         self._history_request_in_flight = False
+        self._settings_request_in_flight = False
         self._notify_buffer.clear()
 
         if client is None:
@@ -168,6 +188,25 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
             self._history_request_in_flight = False
             raise
 
+
+    async def _request_settings(self, client: BleakClient) -> None:
+        self._settings_request_in_flight = True
+        self._last_settings_request = time.monotonic()
+
+        try:
+            await asyncio.sleep(0.1)
+            async with asyncio.timeout(_BLE_OPERATION_TIMEOUT):
+                async with self._operation_lock:
+                    await client.write_gatt_char(
+                        COMMAND_UUID,
+                        Command.REQUEST_SETTINGS.build_payload(
+                            bytearray([0x00, 0x00])
+                        ),
+                    )
+        except (TimeoutError, BleakError):
+            self._settings_request_in_flight = False
+            raise
+
     async def _async_update_data(self) -> VoltcraftData | None:
         """Fetch a fresh measurement and periodically refresh energy history."""
 
@@ -198,13 +237,27 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
 
         now = time.monotonic()
         if (
+            self._settings_request_in_flight
+            and now - self._last_settings_request >= _SETTINGS_RESPONSE_TIMEOUT
+        ):
+            _LOGGER.debug("Timed out waiting for settings response")
+            self._settings_request_in_flight = False
+
+        if (
             self._history_request_in_flight
             and now - self._last_history_poll >= _HISTORY_RESPONSE_TIMEOUT
         ):
             _LOGGER.debug("Timed out waiting for consumption-history response")
             self._history_request_in_flight = False
 
-        if (
+        # Send only one auxiliary request per update to avoid overlapping replies.
+        if self._power_limit_w is None and not self._settings_request_in_flight:
+            try:
+                await self._request_settings(client)
+            except (TimeoutError, BleakError) as err:
+                _LOGGER.debug("Failed to request device settings: %s", err)
+                await self._async_teardown()
+        elif (
             now - self._last_history_poll >= _HISTORY_POLL_INTERVAL
             and not self._history_request_in_flight
         ):
@@ -262,6 +315,7 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
                     payload = NotifyPayload.from_payload(frame)
                 except ValueError as err:
                     self._history_request_in_flight = False
+                    self._settings_request_in_flight = False
                     _LOGGER.warning(
                         "Invalid notification payload %s: %s",
                         frame.hex(),
@@ -296,12 +350,67 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
                     case ConsumptionHistoryNotifyPayload():
                         self._history_request_in_flight = False
 
+
+                    case SettingsNotifyPayload():
+                        self._settings_request_in_flight = False
+                        self._power_limit_w = payload.power_limit_w
+                        self.async_update_listeners()
+
+                    case SetPowerLimitNotifyPayload():
+                        self._last_power_limit_set_success = payload.success
+                        self._power_limit_ack_count += 1
+                        async with self._power_limit_condition:
+                            self._power_limit_condition.notify_all()
+
                     case SwitchNotifyPayload():
                         self.hass.async_create_task(self.async_request_refresh())
 
                     case None:
                         self._history_request_in_flight = False
+                        self._settings_request_in_flight = False
                         _LOGGER.warning("Unknown payload received: %s", frame.hex())
+
+
+    async def async_set_power_limit(self, power_limit_w: int) -> None:
+        """Set the persistent device-side overpower threshold."""
+
+        if not _MIN_POWER_LIMIT_W <= power_limit_w <= _MAX_POWER_LIMIT_W:
+            raise HomeAssistantError(
+                f"Power limit must be between {_MIN_POWER_LIMIT_W} and "
+                f"{_MAX_POWER_LIMIT_W} W"
+            )
+
+        start_count = self._power_limit_ack_count
+        self._last_power_limit_set_success = None
+
+        try:
+            client = await self._async_ensure_connected()
+            params = bytearray(power_limit_w.to_bytes(2, byteorder="big"))
+            params.extend([0x00, 0x00])
+
+            async with asyncio.timeout(_BLE_OPERATION_TIMEOUT):
+                async with self._operation_lock:
+                    await client.write_gatt_char(
+                        COMMAND_UUID,
+                        Command.SET_POWER_LIMIT.build_payload(params),
+                    )
+
+                async with self._power_limit_condition:
+                    await self._power_limit_condition.wait_for(
+                        lambda: self._power_limit_ack_count != start_count
+                    )
+
+            if not self._last_power_limit_set_success:
+                raise HomeAssistantError("Device rejected the power limit")
+
+            self._power_limit_w = power_limit_w
+            self.async_update_listeners()
+        except HomeAssistantError:
+            raise
+        except (TimeoutError, BleakError, UpdateFailed) as err:
+            await self._async_teardown()
+            _LOGGER.error("Failed to set power limit: %s", err)
+            raise HomeAssistantError(f"Failed to set power limit: {err}") from err
 
     async def async_send_switch_command(self, mode: SwitchModes) -> None:
         """Send a switch command to the device."""
@@ -368,6 +477,8 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
             self._missed_updates = 0
             self._history_request_in_flight = False
             self._last_history_poll = 0.0
+            self._settings_request_in_flight = False
+            self._power_limit_w = None
             return new_client
 
     async def _async_teardown(self) -> None:
@@ -384,6 +495,8 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
             self.client = None
 
         self._history_request_in_flight = False
+        self._settings_request_in_flight = False
+        self._power_limit_w = None
         self._notify_buffer.clear()
 
     async def _async_safe_disconnect(

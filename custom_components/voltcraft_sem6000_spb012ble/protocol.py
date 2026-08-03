@@ -38,9 +38,11 @@ from enum import Enum, IntEnum
 class Command(IntEnum):
     SWITCH = 0x03
     MEASURE = 0x04
+    SET_POWER_LIMIT = 0x05
     CONSUMPTION_DAY = 0x0A
     CONSUMPTION_MONTH = 0x0B
     CONSUMPTION_YEAR = 0x0C
+    REQUEST_SETTINGS = 0x10
 
     def build_payload(self, params: bytearray | None = None) -> bytearray:
         if params is None:
@@ -109,15 +111,49 @@ class NotifyPayload:
             return SwitchNotifyPayload.from_data(arguments)
         elif command == Command.MEASURE:
             return MeasureNotifyPayload.from_data(arguments)
+        elif command == Command.SET_POWER_LIMIT:
+            return SetPowerLimitNotifyPayload.from_data(arguments)
         elif command == Command.CONSUMPTION_DAY:
             return ConsumptionHistoryNotifyPayload.from_day(arguments)
         elif command == Command.CONSUMPTION_MONTH:
             return ConsumptionHistoryNotifyPayload.from_month(arguments)
         elif command == Command.CONSUMPTION_YEAR:
             return ConsumptionHistoryNotifyPayload.from_year(arguments)
+        elif command == Command.REQUEST_SETTINGS:
+            return SettingsNotifyPayload.from_data(arguments)
         else:
             # Unknown command
             return None
+
+
+@dataclass(frozen=True)
+class SetPowerLimitNotifyPayload(NotifyPayload):
+    success: bool
+
+    @staticmethod
+    def from_data(data: bytearray) -> SetPowerLimitNotifyPayload:
+        if len(data) < 1:
+            raise ValueError("Unexpected SET_POWER_LIMIT response without status")
+
+        return SetPowerLimitNotifyPayload(success=data[0] == 0)
+
+
+@dataclass(frozen=True)
+class SettingsNotifyPayload(NotifyPayload):
+    power_limit_w: int
+
+    @staticmethod
+    def from_data(data: bytearray) -> SettingsNotifyPayload:
+        # Settings response arguments:
+        # reduced-mode, prices, reduced-period, LED/reserved, power-limit high/low.
+        if len(data) < 11:
+            raise ValueError(
+                f"Unexpected SETTINGS payload length: {len(data)} bytes ({data.hex()})"
+            )
+
+        return SettingsNotifyPayload(
+            power_limit_w=int.from_bytes(data[-2:], byteorder="big")
+        )
 
 
 @dataclass(frozen=True)
@@ -213,5 +249,7 @@ class SwitchNotifyPayload(NotifyPayload):
 ParsedNotifyPayload = (
     SwitchNotifyPayload
     | MeasureNotifyPayload
+    | SetPowerLimitNotifyPayload
+    | SettingsNotifyPayload
     | ConsumptionHistoryNotifyPayload
 )
