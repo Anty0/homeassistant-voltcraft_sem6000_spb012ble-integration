@@ -43,11 +43,11 @@ class PackageConsistencyTests(unittest.TestCase):
             source,
         )
 
-    def test_manifest_is_beta_6_and_uses_core_bluetooth_packages(self) -> None:
+    def test_manifest_is_beta_7_and_uses_core_bluetooth_packages(self) -> None:
         manifest = json.loads(
             (COMPONENT / "manifest.json").read_text(encoding="utf-8")
         )
-        self.assertEqual(manifest["version"], "2.0.0-beta.6")
+        self.assertEqual(manifest["version"], "2.0.0-beta.7")
         self.assertEqual(manifest["codeowners"], ["@citizenserious"])
         self.assertNotIn("requirements", manifest)
         self.assertIn("bluetooth", manifest["dependencies"])
