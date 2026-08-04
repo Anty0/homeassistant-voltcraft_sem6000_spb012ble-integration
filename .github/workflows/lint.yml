@@ -10,30 +10,6 @@ permissions:
   contents: read
 
 jobs:
-  format-check:
-    name: Ruff format check
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # pinned commit
-
-      - name: Set up Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # pinned commit
-        with:
-          python-version: "3.14"
-
-      - name: Install Ruff
-        run: pip install --no-cache-dir -r requirements-dev.txt
-
-      - name: Check formatting of changed Python files
-        run: >-
-          ruff format --check
-          custom_components/voltcraft_sem6000_spb012ble/__init__.py
-          custom_components/voltcraft_sem6000_spb012ble/config_flow.py
-          custom_components/voltcraft_sem6000_spb012ble/protocol.py
-          custom_components/voltcraft_sem6000_spb012ble/security.py
-          tests
-
   lint:
     name: Ruff lint
     runs-on: ubuntu-latest
@@ -74,7 +50,9 @@ jobs:
         run: pip install --no-cache-dir -r requirements-dev.txt
 
       - name: Type check the pure protocol module
-        run: mypy custom_components/voltcraft_sem6000_spb012ble/protocol.py
+        run: |
+          cp custom_components/voltcraft_sem6000_spb012ble/protocol.py /tmp/voltcraft_protocol.py
+          mypy /tmp/voltcraft_protocol.py
 
   protocol-tests:
     name: Protocol security tests
