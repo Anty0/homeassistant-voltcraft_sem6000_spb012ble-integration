@@ -36,7 +36,8 @@ best effort; reports from SPB012BLE users are welcome.
 
 - Automatic device-time synchronization after an authenticated connection
 - Device name
-- Four-digit device PIN authentication
+- Four-digit device PIN entry during setup
+- Administrator-only device PIN change and reset actions
 - Night mode / LED ring control
 - Over-power limit from 1 to 4000 W
 - Over-power protection enable/disable control
@@ -130,16 +131,37 @@ Check entity IDs, automations and the Energy dashboard after the first restart.
 
 ## Configuration and PIN
 
-The integration is configured through the Home Assistant UI. Devices using the
-default or a custom four-digit PIN are authenticated during connection setup.
-The PIN must contain exactly four decimal digits.
+The integration is configured through the Home Assistant UI. Setup asks for the
+plug's four-digit PIN in a masked password field. The factory default is `0000`.
+Only ASCII digits are accepted.
+
+The integration options contain a blank password field for updating the PIN that
+Home Assistant uses to log in. The stored PIN is deliberately not returned to the
+browser. Leaving the field empty keeps the current value.
+
+To change the PIN on the plug itself, use the administrator-only **Change PIN**
+action and enable its confirmation field. After the device acknowledges the
+change, the integration updates its stored PIN and reloads the config entry.
+**Reset PIN**, consumption reset and factory reset are also restricted to Home
+Assistant administrators and require explicit confirmation.
+
+Run PIN changes interactively. Do not place a PIN in YAML automations, scripts or
+blueprints because action data and traces can retain a clear-text copy.
+
+The PIN is stored in the Home Assistant config entry and is therefore included in
+Home Assistant backups. Masking prevents casual disclosure in the UI; it is not
+additional encryption. The device protocol uses only four digits, so Home
+Assistant account security and physical BLE proximity remain important.
 
 ## Services and advanced functions
 
-Timer and schedule operations are exposed through integration services. Their
+Timer and schedule operations are exposed through integration actions. Their
 current state is also available through the Timer and Schedules entities. Use
 Home Assistant's **Developer tools -> Actions** view to inspect the available
 fields and target the correct Voltcraft device.
+
+Routine device actions require control permission for the plug's outlet entity.
+Credential changes and destructive reset actions require administrator access.
 
 ## Debug logging
 
@@ -152,9 +174,10 @@ logger:
     custom_components.voltcraft_sem6000_spb012ble: debug
 ```
 
-Downloaded Home Assistant logs can contain unrelated integration data, hostnames,
-usernames and device identifiers. Review and redact complete logs before posting
-them publicly.
+Complete BLE notification frames are redacted by the integration before they are
+written to the log. Downloaded Home Assistant logs can still contain unrelated
+integration data, hostnames, usernames and device identifiers. Review and redact
+complete logs before posting them publicly.
 
 ## Reporting issues
 
@@ -172,7 +195,11 @@ they concern features or releases provided only by this fork.
 
 ## AI-assisted development
 
-Development of this fork was assisted by generative AI tools for code analysis, implementation, debugging and documentation. All changes were reviewed, adapted and tested by the maintainer. Responsibility for the code, releases and project maintenance remains with the maintainer.
+Development of this fork was assisted by generative AI tools for code analysis,
+implementation, debugging and documentation. AI-assisted changes are reviewed
+and adapted by the maintainer and must pass project tests and device validation
+before release. Responsibility for the code, releases and project maintenance
+remains with the maintainer.
 
 ## Upstream relationship and credits
 

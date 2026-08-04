@@ -2,18 +2,28 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+
 import voluptuous as vol
 
+from homeassistant.auth.permissions.const import POLICY_CONTROL
 from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_MAC, Platform
 from homeassistant.core import HomeAssistant, ServiceCall
-from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
-from homeassistant.helpers import config_validation as cv
+from homeassistant.exceptions import (
+    ConfigEntryNotReady,
+    HomeAssistantError,
+    Unauthorized,
+    UnknownUser,
+)
+from homeassistant.helpers import config_validation as cv, entity_registry as er
+from homeassistant.helpers.service import async_register_admin_service
+from homeassistant.helpers.typing import ConfigType
 from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
 from .coordinator import VoltcraftDataUpdateCoordinator
+from .security import install_sensitive_log_filter
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -25,7 +35,6 @@ PLATFORMS: list[Platform] = [
     Platform.TEXT,
     Platform.BUTTON,
 ]
-
 _SERVICE_MARKER = "_services_registered"
 CONF_CONFIG_ENTRY_ID = "config_entry_id"
 CONF_ACTION = "action"
@@ -66,7 +75,64 @@ def _coordinator_for_call(
         return coordinators[0]
     if not coordinators:
         raise HomeAssistantError("No loaded Voltcraft SEM6000 config entry")
-    raise HomeAssistantError("config_entry_id is required when multiple plugs are loaded")
+    raise HomeAssistantError(
+        "config_entry_id is required when multiple plugs are loaded"
+    )
+
+
+def _control_entity_id(
+    hass: HomeAssistant, coordinator: VoltcraftDataUpdateCoordinator
+) -> str | None:
+    """Return the outlet entity used for Home Assistant permission checks."""
+    registry = er.async_get(hass)
+    entries = er.async_entries_for_config_entry(
+        registry, coordinator.config_entry.entry_id
+    )
+
+    # The main outlet switch uses the formatted MAC address as its unique ID.
+    # Check permissions against that entity, not against an arbitrary settings
+    # switch belonging to the same device.
+    for entry in entries:
+        if entry.platform == DOMAIN and entry.unique_id == coordinator.mac:
+            return entry.entity_id
+
+    # Do not authorize against an arbitrary settings switch. If the outlet
+    # registry entry is missing, deny the custom action instead.
+    return None
+
+
+async def _async_require_control_permission(
+    hass: HomeAssistant,
+    call: ServiceCall,
+    coordinator: VoltcraftDataUpdateCoordinator,
+) -> None:
+    """Require control permission for the plug represented by a service call."""
+    user_id = call.context.user_id
+    if not user_id:
+        # Home Assistant uses context-less calls for internal automations and
+        # startup work. This follows the core entity-service permission model.
+        return
+
+    entity_id = _control_entity_id(hass, coordinator)
+    user = await hass.auth.async_get_user(user_id)
+    if user is None:
+        raise UnknownUser(
+            context=call.context,
+            entity_id=entity_id,
+            permission=POLICY_CONTROL,
+        )
+    if user.is_admin:
+        return
+    if entity_id is None or not user.permissions.check_entity(
+        entity_id, POLICY_CONTROL
+    ):
+        raise Unauthorized(
+            context=call.context,
+            user_id=user_id,
+            entity_id=entity_id,
+            config_entry_id=coordinator.config_entry.entry_id,
+            permission=POLICY_CONTROL,
+        )
 
 
 async def _async_register_services(hass: HomeAssistant) -> None:
@@ -76,8 +142,15 @@ async def _async_register_services(hass: HomeAssistant) -> None:
 
     common = {vol.Optional(CONF_CONFIG_ENTRY_ID): cv.string}
 
-    async def handle_set_timer(call: ServiceCall) -> None:
+    async def controlled_coordinator(
+        call: ServiceCall,
+    ) -> VoltcraftDataUpdateCoordinator:
         coordinator = _coordinator_for_call(hass, call)
+        await _async_require_control_permission(hass, call, coordinator)
+        return coordinator
+
+    async def handle_set_timer(call: ServiceCall) -> None:
+        coordinator = await controlled_coordinator(call)
         turn_on = call.data[CONF_ACTION] == "on"
         seconds = call.data.get(CONF_SECONDS)
         target = call.data.get(CONF_AT)
@@ -89,10 +162,10 @@ async def _async_register_services(hass: HomeAssistant) -> None:
             await coordinator.async_set_timer(turn_on, _local_naive(target))
 
     async def handle_stop_timer(call: ServiceCall) -> None:
-        await _coordinator_for_call(hass, call).async_stop_timer()
+        await (await controlled_coordinator(call)).async_stop_timer()
 
     async def handle_set_schedule(call: ServiceCall) -> None:
-        coordinator = _coordinator_for_call(hass, call)
+        coordinator = await controlled_coordinator(call)
         await coordinator.async_set_schedule(
             slot=call.data.get(CONF_SLOT),
             active=call.data[CONF_ACTIVE],
@@ -102,10 +175,11 @@ async def _async_register_services(hass: HomeAssistant) -> None:
         )
 
     async def handle_remove_schedule(call: ServiceCall) -> None:
-        await _coordinator_for_call(hass, call).async_remove_schedule(call.data[CONF_SLOT])
+        coordinator = await controlled_coordinator(call)
+        await coordinator.async_remove_schedule(call.data[CONF_SLOT])
 
     async def handle_set_random(call: ServiceCall) -> None:
-        coordinator = _coordinator_for_call(hass, call)
+        coordinator = await controlled_coordinator(call)
         from .protocol import weekday_mask
 
         await coordinator.async_set_random(
@@ -116,7 +190,11 @@ async def _async_register_services(hass: HomeAssistant) -> None:
         )
 
     async def handle_change_pin(call: ServiceCall) -> None:
-        await _coordinator_for_call(hass, call).async_change_pin(call.data[CONF_NEW_PIN])
+        if not call.data[CONF_CONFIRM]:
+            raise HomeAssistantError("Set confirm to true to change the device PIN")
+        await _coordinator_for_call(hass, call).async_change_pin(
+            call.data[CONF_NEW_PIN]
+        )
 
     async def handle_reset_pin(call: ServiceCall) -> None:
         if not call.data[CONF_CONFIRM]:
@@ -134,7 +212,7 @@ async def _async_register_services(hass: HomeAssistant) -> None:
         await _coordinator_for_call(hass, call).async_factory_reset()
 
     async def handle_refresh_all(call: ServiceCall) -> None:
-        await _coordinator_for_call(hass, call).async_refresh_all()
+        await (await controlled_coordinator(call)).async_refresh_all()
 
     hass.services.async_register(
         DOMAIN,
@@ -144,7 +222,9 @@ async def _async_register_services(hass: HomeAssistant) -> None:
             {
                 **common,
                 vol.Required(CONF_ACTION): vol.In(("on", "off")),
-                vol.Optional(CONF_SECONDS): vol.All(vol.Coerce(int), vol.Range(min=1, max=31_536_000)),
+                vol.Optional(CONF_SECONDS): vol.All(
+                    vol.Coerce(int), vol.Range(min=1, max=31_536_000)
+                ),
                 vol.Optional(CONF_AT): cv.datetime,
             }
         ),
@@ -162,10 +242,14 @@ async def _async_register_services(hass: HomeAssistant) -> None:
         schema=vol.Schema(
             {
                 **common,
-                vol.Optional(CONF_SLOT): vol.All(vol.Coerce(int), vol.Range(min=1, max=12)),
+                vol.Optional(CONF_SLOT): vol.All(
+                    vol.Coerce(int), vol.Range(min=1, max=12)
+                ),
                 vol.Optional(CONF_ACTIVE, default=True): cv.boolean,
                 vol.Required(CONF_ACTION): vol.In(("on", "off")),
-                vol.Optional(CONF_WEEKDAYS, default=[]): vol.Any(cv.string, [cv.string]),
+                vol.Optional(CONF_WEEKDAYS, default=[]): vol.Any(
+                    cv.string, [cv.string]
+                ),
                 vol.Required(CONF_AT): cv.datetime,
             }
         ),
@@ -177,7 +261,9 @@ async def _async_register_services(hass: HomeAssistant) -> None:
         schema=vol.Schema(
             {
                 **common,
-                vol.Required(CONF_SLOT): vol.All(vol.Coerce(int), vol.Range(min=1, max=12)),
+                vol.Required(CONF_SLOT): vol.All(
+                    vol.Coerce(int), vol.Range(min=1, max=12)
+                ),
             }
         ),
     )
@@ -189,41 +275,53 @@ async def _async_register_services(hass: HomeAssistant) -> None:
             {
                 **common,
                 vol.Required(CONF_ACTIVE): cv.boolean,
-                vol.Optional(CONF_WEEKDAYS, default=[]): vol.Any(cv.string, [cv.string]),
+                vol.Optional(CONF_WEEKDAYS, default=[]): vol.Any(
+                    cv.string, [cv.string]
+                ),
                 vol.Required(CONF_START): cv.time,
                 vol.Required(CONF_END): cv.time,
             }
         ),
     )
-    hass.services.async_register(
+
+    # Credential changes and destructive resets are restricted to administrators.
+    async_register_admin_service(
+        hass,
         DOMAIN,
         "change_pin",
         handle_change_pin,
         schema=vol.Schema(
             {
                 **common,
-                vol.Required(CONF_NEW_PIN): vol.All(cv.string, vol.Match(r"^\d{4}$")),
+                vol.Required(CONF_NEW_PIN): vol.All(
+                    cv.string, vol.Match(r"^[0-9]{4}$")
+                ),
+                vol.Required(CONF_CONFIRM): cv.boolean,
             }
         ),
     )
-    hass.services.async_register(
+    async_register_admin_service(
+        hass,
         DOMAIN,
         "reset_pin",
         handle_reset_pin,
         schema=vol.Schema({**common, vol.Required(CONF_CONFIRM): cv.boolean}),
     )
-    hass.services.async_register(
+    async_register_admin_service(
+        hass,
         DOMAIN,
         "reset_consumption",
         handle_reset_consumption,
         schema=vol.Schema({**common, vol.Required(CONF_CONFIRM): cv.boolean}),
     )
-    hass.services.async_register(
+    async_register_admin_service(
+        hass,
         DOMAIN,
         "factory_reset",
         handle_factory_reset,
         schema=vol.Schema({**common, vol.Required(CONF_CONFIRM): cv.boolean}),
     )
+
     hass.services.async_register(
         DOMAIN,
         "refresh_all",
@@ -233,16 +331,29 @@ async def _async_register_services(hass: HomeAssistant) -> None:
     domain_data[_SERVICE_MARKER] = True
 
 
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Set up integration-wide services and privacy filters."""
+    install_sensitive_log_filter()
+    await _async_register_services(hass)
+    return True
+
+
 async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
     await hass.config_entries.async_reload(entry.entry_id)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    # Config-entry setup can also occur at runtime. Install the privacy filter
+    # and register services here as well as in async_setup; both helpers are
+    # idempotent. This guarantees that no BLE notification is logged before
+    # redaction is active.
+    install_sensitive_log_filter()
+    await _async_register_services(hass)
+
     mac_address = entry.data[CONF_MAC]
     ble_device = bluetooth.async_ble_device_from_address(
         hass, mac_address, connectable=True
     )
-
     coordinator = VoltcraftDataUpdateCoordinator(
         hass,
         entry,
@@ -254,13 +365,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await coordinator.async_config_entry_first_refresh()
     except ConfigEntryNotReady as err:
         _LOGGER.warning(
-            "Initial Voltcraft connection unavailable; loading entities and retrying: %s",
+            "Initial Voltcraft connection unavailable; loading entities and "
+            "retrying: %s",
             err,
         )
-
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
-    await _async_register_services(hass)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 

@@ -3,7 +3,13 @@
     "step": {
       "confirm": {
         "title": "{name} einrichten",
-        "description": "Dieses Voltcraft SEM6000 / SPB012BLE hinzufügen?"
+        "description": "Dieses Voltcraft SEM6000 / SPB012BLE hinzufügen und mit seiner vierstelligen Geräte-PIN authentifizieren?",
+        "data": {
+          "pin": "Vierstellige PIN"
+        },
+        "data_description": {
+          "pin": "Die Werkseinstellung ist 0000. Der Wert wird im Formular maskiert."
+        }
       },
       "user": {
         "title": "Gerät auswählen",
@@ -11,6 +17,9 @@
           "mac": "Gerät"
         }
       }
+    },
+    "error": {
+      "invalid_pin": "Die PIN muss genau vier Dezimalziffern enthalten."
     },
     "abort": {
       "already_configured": "Dieses Gerät ist bereits eingerichtet.",
@@ -21,10 +30,17 @@
     "step": {
       "init": {
         "title": "Geräteauthentifizierung",
+        "description": "Hier wird nur die von Home Assistant für die Anmeldung verwendete PIN aktualisiert. Das Feld leer lassen, um die gespeicherte PIN beizubehalten. Die PIN am Gerät selbst wird über die Aktion „PIN ändern“ geändert.",
         "data": {
           "pin": "Vierstellige PIN"
+        },
+        "data_description": {
+          "pin": "Die vorhandene PIN wird niemals an den Browser zurückgegeben."
         }
       }
+    },
+    "error": {
+      "invalid_pin": "Die PIN muss genau vier Dezimalziffern enthalten."
     }
   }
 }

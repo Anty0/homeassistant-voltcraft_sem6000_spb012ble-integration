@@ -1,7 +1,7 @@
 """Protocol support for Voltcraft SEM6000 / SPB012BLE devices.
 
 The frame formats are based on the public reverse-engineered SEM6000 protocol
-and the user's Android HCI capture.  The separate over-power protection command
+and the user's Android HCI capture. The separate over-power protection command
 (0x06) is taken from that capture.
 """
 
@@ -21,6 +21,7 @@ class Command(IntEnum):
     SET_POWER_LIMIT = 0x05
     SET_POWER_PROTECTION = 0x06
     APP_FINALIZE = 0x07
+    SET_TIMER = 0x08
     GET_TIMER = 0x09
     CONSUMPTION_DAY = 0x0A
     CONSUMPTION_MONTH = 0x0B
@@ -33,7 +34,6 @@ class Command(IntEnum):
     SET_RANDOM = 0x15
     GET_RANDOM = 0x16
     LOGIN = 0x17
-    SET_TIMER = 0x08
 
     def build_payload(self, params: bytes | bytearray | None = None) -> bytearray:
         return build_frame(self, 0x00, params or b"")
@@ -92,26 +92,28 @@ def build_frame(
     The checksum used by this protocol is ``1 + sum(payload)`` modulo 256,
     where payload starts with command and subcommand.
     """
-
     payload = bytes([int(command), subcommand]) + bytes(params)
     length = len(payload) + 1
     checksum = (1 + sum(payload)) & 0xFF
-    return bytearray(b"\x0f" + bytes([length]) + payload + bytes([checksum]) + suffix)
+    return bytearray(
+        b"\x0f" + bytes([length]) + payload + bytes([checksum]) + suffix
+    )
 
 
 def expected_message_length(buffer: bytes | bytearray) -> int | None:
     if len(buffer) < 2 or buffer[0] != 0x0F:
         return None
+
     # The official Android app sends command 0x07 at the end of its initial
-    # state read.  This firmware answers with a nine-byte frame whose length
-    # byte claims 0x08.  Handle the observed wire format explicitly so the
+    # state read. This firmware answers with a nine-byte frame whose length
+    # byte claims 0x08. Handle the observed wire format explicitly so the
     # following notification is not accidentally appended to it.
     if len(buffer) >= 4 and buffer[2] == Command.APP_FINALIZE and buffer[3] == 0:
         return 9
-    # Measurement notifications are always 19 bytes on the wire.  Hardware
+
+    # Measurement notifications are always 19 bytes on the wire. Hardware
     # version 2 reports length 0x11 and omits the usual FFFF suffix, while
-    # hardware version 3 reports the two-byte-short value 0x0F.  Treat both
-    # forms explicitly instead of waiting forever for bytes that will not come.
+    # hardware version 3 reports 0x0F. Both use the final wire byte as checksum.
     if (
         len(buffer) >= 4
         and buffer[2] == Command.MEASURE
@@ -119,13 +121,59 @@ def expected_message_length(buffer: bytes | bytearray) -> int | None:
         and buffer[1] in (0x0F, 0x11)
     ):
         return 19
+
     return int(buffer[1]) + 4
+
+
+def validate_notify_frame(payload: bytes | bytearray) -> bytes:
+    """Validate frame length, suffix and checksum before parsing its content."""
+    if len(payload) < 4 or payload[0] != 0x0F:
+        raise ValueError("Invalid SEM6000 frame header")
+
+    expected = expected_message_length(payload)
+    if expected is None or len(payload) < expected:
+        raise ValueError("Incomplete SEM6000 frame")
+    frame = bytes(payload[:expected])
+
+    command = frame[2]
+    subcommand = frame[3]
+
+    if command == Command.APP_FINALIZE and subcommand == 0:
+        # Observed wire response: 0f080700000007ffff. This response uses the
+        # payload sum without the usual +1 as its checksum. Validate that
+        # documented exception explicitly instead of accepting arbitrary data.
+        if len(frame) != 9 or frame[1] != 0x08 or frame[-2:] != b"\xff\xff":
+            raise ValueError("Invalid app-finalization response framing")
+        expected_checksum = sum(frame[2:6]) & 0xFF
+        if frame[6] != expected_checksum:
+            raise ValueError("Invalid app-finalization response checksum")
+        return frame
+
+    if command == Command.MEASURE and subcommand == 0 and len(frame) == 19:
+        actual_checksum = frame[-1]
+        expected_checksum = (1 + sum(frame[2:-1])) & 0xFF
+        if actual_checksum != expected_checksum:
+            raise ValueError("Invalid measurement checksum")
+        return frame
+
+    length = frame[1]
+    checksum_index = length + 1
+    if checksum_index + 2 >= len(frame):
+        raise ValueError("Invalid SEM6000 frame length")
+    if frame[checksum_index + 1 : checksum_index + 3] != b"\xff\xff":
+        raise ValueError("Invalid SEM6000 frame suffix")
+
+    actual_checksum = frame[checksum_index]
+    expected_checksum = (1 + sum(frame[2:checksum_index])) & 0xFF
+    if actual_checksum != expected_checksum:
+        raise ValueError("Invalid SEM6000 frame checksum")
+    return frame
 
 
 def normalize_pin(pin: str) -> str:
     pin = str(pin).strip()
-    if len(pin) != 4 or not pin.isdecimal():
-        raise ValueError("PIN must be exactly four decimal digits")
+    if len(pin) != 4 or not pin.isascii() or not pin.isdigit():
+        raise ValueError("PIN must be exactly four ASCII decimal digits")
     return pin
 
 
@@ -137,13 +185,27 @@ def weekday_mask(values: list[str] | tuple[str, ...] | set[str] | str) -> int:
     if isinstance(values, str):
         values = [part.strip().lower() for part in values.split(",") if part.strip()]
     aliases = {
-        "so": "sun", "sonntag": "sun", "sunday": "sun",
-        "mo": "mon", "montag": "mon", "monday": "mon",
-        "di": "tue", "dienstag": "tue", "tuesday": "tue",
-        "mi": "wed", "mittwoch": "wed", "wednesday": "wed",
-        "do": "thu", "donnerstag": "thu", "thursday": "thu",
-        "fr": "fri", "freitag": "fri", "friday": "fri",
-        "sa": "sat", "samstag": "sat", "saturday": "sat",
+        "so": "sun",
+        "sonntag": "sun",
+        "sunday": "sun",
+        "mo": "mon",
+        "montag": "mon",
+        "monday": "mon",
+        "di": "tue",
+        "dienstag": "tue",
+        "tuesday": "tue",
+        "mi": "wed",
+        "mittwoch": "wed",
+        "wednesday": "wed",
+        "do": "thu",
+        "donnerstag": "thu",
+        "thursday": "thu",
+        "fr": "fri",
+        "freitag": "fri",
+        "friday": "fri",
+        "sa": "sat",
+        "samstag": "sat",
+        "saturday": "sat",
     }
     mask = 0
     for value in values:
@@ -155,7 +217,9 @@ def weekday_mask(values: list[str] | tuple[str, ...] | set[str] | str) -> int:
 
 
 def weekdays_from_mask(mask: int) -> tuple[str, ...]:
-    return tuple(name for index, name in enumerate(WEEKDAY_NAMES) if mask & (1 << index))
+    return tuple(
+        name for index, name in enumerate(WEEKDAY_NAMES) if mask & (1 << index)
+    )
 
 
 def minutes_from_time(value: time) -> int:
@@ -170,15 +234,25 @@ def time_from_minutes(value: int) -> time:
 class Commands:
     @staticmethod
     def login(pin: str) -> bytearray:
-        return build_frame(Command.LOGIN, 0, bytes([PinOperation.AUTHORIZE]) + pin_bytes(pin) + b"\0" * 4)
+        return build_frame(
+            Command.LOGIN,
+            0,
+            bytes([PinOperation.AUTHORIZE]) + pin_bytes(pin) + b"\0" * 4,
+        )
 
     @staticmethod
     def change_pin(old_pin: str, new_pin: str) -> bytearray:
-        return build_frame(Command.LOGIN, 0, bytes([PinOperation.CHANGE]) + pin_bytes(new_pin) + pin_bytes(old_pin))
+        return build_frame(
+            Command.LOGIN,
+            0,
+            bytes([PinOperation.CHANGE]) + pin_bytes(new_pin) + pin_bytes(old_pin),
+        )
 
     @staticmethod
     def reset_pin() -> bytearray:
-        return build_frame(Command.LOGIN, 0, bytes([PinOperation.RESET]) + b"\0" * 8)
+        return build_frame(
+            Command.LOGIN, 0, bytes([PinOperation.RESET]) + b"\0" * 8
+        )
 
     @staticmethod
     def sync_time(value: datetime) -> bytearray:
@@ -212,11 +286,15 @@ class Commands:
     def set_power_limit(watts: int) -> bytearray:
         if not 1 <= int(watts) <= 4000:
             raise ValueError("Power limit must be between 1 and 4000 W")
-        return build_frame(Command.SET_POWER_LIMIT, 0, int(watts).to_bytes(2, "big") + b"\0\0")
+        return build_frame(
+            Command.SET_POWER_LIMIT, 0, int(watts).to_bytes(2, "big") + b"\0\0"
+        )
 
     @staticmethod
     def set_power_protection(enabled: bool) -> bytearray:
-        return build_frame(Command.SET_POWER_PROTECTION, 0, bytes([1 if enabled else 0, 0]))
+        return build_frame(
+            Command.SET_POWER_PROTECTION, 0, bytes([1 if enabled else 0, 0])
+        )
 
     @staticmethod
     def set_prices(normal_cents: int, reduced_cents: int) -> bytearray:
@@ -225,7 +303,8 @@ class Commands:
         return build_frame(
             Command.SETTINGS_CONTROL,
             0,
-            bytes([SettingsOperation.PRICES, normal_cents, reduced_cents]) + b"\0" * 4,
+            bytes([SettingsOperation.PRICES, normal_cents, reduced_cents])
+            + b"\0" * 4,
         )
 
     @staticmethod
@@ -262,9 +341,18 @@ class Commands:
             action = TimerAction.INACTIVE
         else:
             fields = bytes(
-                [target.second, target.minute, target.hour, target.day, target.month, target.year % 100]
+                [
+                    target.second,
+                    target.minute,
+                    target.hour,
+                    target.day,
+                    target.month,
+                    target.year % 100,
+                ]
             )
-        return build_frame(Command.SET_TIMER, 0, bytes([action]) + fields + b"\0\0")
+        return build_frame(
+            Command.SET_TIMER, 0, bytes([action]) + fields + b"\0\0"
+        )
 
     @staticmethod
     def request_schedule(page: int = 0) -> bytearray:
@@ -281,10 +369,7 @@ class Commands:
         weekdays: int,
         when: datetime,
     ) -> bytearray:
-        if operation is ScheduleOperation.ADD:
-            wire_slot = 0
-        else:
-            wire_slot = slot_id
+        wire_slot = 0 if operation is ScheduleOperation.ADD else slot_id
         if operation is ScheduleOperation.REMOVE:
             return build_frame(
                 Command.SET_SCHEDULE,
@@ -314,7 +399,9 @@ class Commands:
         return build_frame(Command.GET_RANDOM, 0, b"\0\0")
 
     @staticmethod
-    def set_random(enabled: bool, weekdays: int, start: time, end: time) -> bytearray:
+    def set_random(
+        enabled: bool, weekdays: int, start: time, end: time
+    ) -> bytearray:
         return build_frame(
             Command.SET_RANDOM,
             0,
@@ -440,7 +527,13 @@ class ScheduleEntry:
         if self.is_repeating:
             return None
         try:
-            return datetime(2000 + self.year, self.month, self.day, self.hour, self.minute)
+            return datetime(
+                2000 + self.year,
+                self.month,
+                self.day,
+                self.hour,
+                self.minute,
+            )
         except ValueError:
             return None
 
@@ -480,7 +573,9 @@ ParsedNotifyPayload: TypeAlias = (
 )
 
 
-def _history_payload(kind: HistoryKind, data: bytes) -> ConsumptionHistoryNotifyPayload:
+def _history_payload(
+    kind: HistoryKind, data: bytes
+) -> ConsumptionHistoryNotifyPayload:
     values: list[int | None] = []
     if kind is HistoryKind.DAY:
         size = 2
@@ -498,23 +593,27 @@ def _history_payload(kind: HistoryKind, data: bytes) -> ConsumptionHistoryNotify
     return ConsumptionHistoryNotifyPayload(kind, tuple(values))
 
 
-def parse_notify_payload(payload: bytes | bytearray) -> ParsedNotifyPayload | None:
+def parse_notify_payload(
+    payload: bytes | bytearray,
+) -> ParsedNotifyPayload | None:
     if len(payload) < 4 or payload[0] != 0x0F:
         return None
     expected = expected_message_length(payload)
     if expected is None or len(payload) < expected:
         return None
 
-    if payload[2] == Command.APP_FINALIZE and payload[3] == 0 and expected == 9:
-        # Observed response: 0f080700000007ffff.  It carries no documented
-        # state; zero in the first status byte is treated as success.
-        return AckNotifyPayload(Command.APP_FINALIZE, 0, payload[4] == 0)
+    frame = validate_notify_frame(payload)
 
-    length = payload[1]
-    body = bytes(payload[2 : length + 2])
+    if frame[2] == Command.APP_FINALIZE and frame[3] == 0 and expected == 9:
+        # Observed response: 0f080700000007ffff. It carries no documented
+        # state; zero in the first status byte is treated as success.
+        return AckNotifyPayload(Command.APP_FINALIZE, 0, frame[4] == 0)
+
+    length = frame[1]
+    body = bytes(frame[2 : length + 2])
     if len(body) < 3:
         return None
-    params = body[:-1]  # strip protocol checksum
+    params = body[:-1]  # strip protocol checksum in the standard body layout
     if len(params) < 2:
         return None
     command, subcommand = params[0], params[1]
@@ -522,14 +621,18 @@ def parse_notify_payload(payload: bytes | bytearray) -> ParsedNotifyPayload | No
 
     if command == Command.MEASURE:
         if len(args) < 8:
-            raise ValueError(f"Unexpected MEASURE payload: {args.hex()}")
+            raise ValueError(
+                f"Unexpected MEASURE payload length: {len(args)} bytes"
+            )
         return MeasureNotifyPayload(
             is_on=bool(args[0]),
             power=int.from_bytes(args[1:4], "big"),
             voltage=args[4],
             current=int.from_bytes(args[5:7], "big"),
             frequency=args[7],
-            consumed_energy=int.from_bytes(args[10:14], "big") if len(args) >= 14 else None,
+            consumed_energy=(
+                int.from_bytes(args[10:14], "big") if len(args) >= 14 else None
+            ),
         )
 
     if command == Command.CONSUMPTION_DAY:
@@ -542,12 +645,18 @@ def parse_notify_payload(payload: bytes | bytearray) -> ParsedNotifyPayload | No
     if command == Command.LOGIN:
         if not args:
             raise ValueError("PIN response has no status")
-        operation = PinOperation(args[1]) if len(args) >= 2 and args[1] in PinOperation._value2member_map_ else PinOperation.AUTHORIZE
-        return LoginNotifyPayload(operation, args[0] == 0)
+        pin_operation = (
+            PinOperation(args[1])
+            if len(args) >= 2 and args[1] in PinOperation._value2member_map_
+            else PinOperation.AUTHORIZE
+        )
+        return LoginNotifyPayload(pin_operation, args[0] == 0)
 
     if command == Command.GET_SETTINGS:
         if len(args) < 11:
-            raise ValueError(f"Unexpected settings payload: {args.hex()}")
+            raise ValueError(
+                f"Unexpected settings payload length: {len(args)} bytes"
+            )
         return SettingsNotifyPayload(
             reduced_tariff_enabled=bool(args[0]),
             normal_price_cents=args[1],
@@ -557,22 +666,30 @@ def parse_notify_payload(payload: bytes | bytearray) -> ParsedNotifyPayload | No
             night_mode=args[7] == 0,
             # On the tested SEM6000 firmware, args[8] remains 0 both before
             # and after a successfully acknowledged 0x06 protection toggle.
-            # It is therefore not a readable protection-state field. Keep the
-            # state unknown here and let the coordinator preserve the last
-            # command-confirmed value instead of forcing the HA switch to off.
             power_protection_enabled=None,
             power_limit_watts=int.from_bytes(args[9:11], "big"),
         )
 
     if command == Command.GET_TIMER:
         if len(args) < 10:
-            raise ValueError(f"Unexpected timer payload: {args.hex()}")
-        action = TimerAction(args[0]) if args[0] in TimerAction._value2member_map_ else TimerAction.INACTIVE
+            raise ValueError(
+                f"Unexpected timer payload length: {len(args)} bytes"
+            )
+        action = (
+            TimerAction(args[0])
+            if args[0] in TimerAction._value2member_map_
+            else TimerAction.INACTIVE
+        )
         target = None
         if action is not TimerAction.INACTIVE:
             try:
                 target = datetime(
-                    2000 + args[6], args[5], args[4], args[3], args[2], args[1]
+                    2000 + args[6],
+                    args[5],
+                    args[4],
+                    args[3],
+                    args[2],
+                    args[1],
                 )
             except ValueError:
                 target = None
@@ -581,12 +698,19 @@ def parse_notify_payload(payload: bytes | bytearray) -> ParsedNotifyPayload | No
 
     if command == Command.GET_RANDOM:
         if len(args) < 6:
-            raise ValueError(f"Unexpected random-mode payload: {args.hex()}")
+            raise ValueError(
+                f"Unexpected random-mode payload length: {len(args)} bytes"
+            )
+        try:
+            start = time(args[2], args[3])
+            end = time(args[4], args[5])
+        except ValueError as err:
+            raise ValueError("Invalid random-mode time fields") from err
         return RandomStatusNotifyPayload(
             enabled=bool(args[0]),
             weekday_mask=args[1],
-            start=time(args[2], args[3]),
-            end=time(args[4], args[5]),
+            start=start,
+            end=end,
         )
 
     if command == Command.GET_SCHEDULE:
@@ -599,6 +723,11 @@ def parse_notify_payload(payload: bytes | bytearray) -> ParsedNotifyPayload | No
             chunk = data[offset : offset + 12]
             if len(chunk) < 12:
                 break
+            try:
+                time(chunk[7], chunk[8])
+            except ValueError:
+                # A corrupted schedule must not make the complete entity fail.
+                continue
             entries.append(
                 ScheduleEntry(
                     slot_id=chunk[0],
@@ -618,12 +747,16 @@ def parse_notify_payload(payload: bytes | bytearray) -> ParsedNotifyPayload | No
         serial = args.rstrip(b"\0").decode("ascii", errors="replace")
         return SerialNotifyPayload(serial)
 
-    # Generic acknowledgements.  0x0f embeds its operation as the first arg;
+    # Generic acknowledgements. 0x0f embeds its operation as the first arg;
     # 0x17 is handled above because its layout is different.
-    operation = args[0] if command == Command.SETTINGS_CONTROL and args else subcommand
-    status_index = 1 if command == Command.SETTINGS_CONTROL and len(args) >= 2 else 0
+    ack_operation = (
+        args[0] if command == Command.SETTINGS_CONTROL and args else subcommand
+    )
+    status_index = (
+        1 if command == Command.SETTINGS_CONTROL and len(args) >= 2 else 0
+    )
     success = not args or args[status_index] == 0
-    return AckNotifyPayload(command, operation, success)
+    return AckNotifyPayload(command, ack_operation, success)
 
 
 def response_key(payload: ParsedNotifyPayload) -> tuple[int, int] | None:

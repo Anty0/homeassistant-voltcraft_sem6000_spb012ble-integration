@@ -1,6 +1,6 @@
 set_timer:
   name: Set timer
-  description: Turn the outlet on or off after a delay or at a specific date and time.
+  description: Turn the outlet on or off after a delay or at a specific date and time. Requires control permission for the outlet.
   fields:
     config_entry_id:
       name: Config entry ID
@@ -31,19 +31,17 @@ set_timer:
       description: Use either this field or Delay in seconds, not both.
       selector:
         datetime:
-
 stop_timer:
   name: Stop timer
-  description: Disable the currently active timer.
+  description: Disable the currently active timer. Requires control permission for the outlet.
   fields:
     config_entry_id:
       name: Config entry ID
       selector:
         text:
-
 set_schedule:
   name: Add or edit schedule
-  description: Add a schedule, or edit a slot from 1 through 12. Leave weekdays empty for a one-time schedule.
+  description: Add a schedule, or edit a slot from 1 through 12. Leave weekdays empty for a one-time schedule. Requires control permission for the outlet.
   fields:
     config_entry_id:
       name: Config entry ID
@@ -82,9 +80,9 @@ set_schedule:
       required: true
       selector:
         datetime:
-
 remove_schedule:
   name: Remove schedule
+  description: Remove a schedule slot. Requires control permission for the outlet.
   fields:
     config_entry_id:
       name: Config entry ID
@@ -98,9 +96,9 @@ remove_schedule:
           min: 1
           max: 12
           mode: box
-
 set_random_mode:
   name: Configure random mode
+  description: Configure the plug's random mode. Requires control permission for the outlet.
   fields:
     config_entry_id:
       name: Config entry ID
@@ -126,10 +124,9 @@ set_random_mode:
       required: true
       selector:
         time:
-
 change_pin:
   name: Change PIN
-  description: Change the four-digit device PIN. The current configured PIN is used for authorization.
+  description: Change the four-digit device PIN and update the PIN stored by Home Assistant. Administrator access and explicit confirmation are required.
   fields:
     config_entry_id:
       name: Config entry ID
@@ -141,10 +138,14 @@ change_pin:
       selector:
         text:
           type: password
-
+    confirm:
+      name: Confirm
+      required: true
+      selector:
+        boolean:
 reset_pin:
   name: Reset PIN
-  description: Reset the device PIN to 0000. This is a destructive authentication change.
+  description: Reset the device PIN to 0000 and update Home Assistant. Administrator access and explicit confirmation are required.
   fields:
     config_entry_id:
       name: Config entry ID
@@ -155,10 +156,9 @@ reset_pin:
       required: true
       selector:
         boolean:
-
 reset_consumption:
   name: Reset consumption data
-  description: Permanently erase the consumption history stored in the plug.
+  description: Permanently erase the consumption history stored in the plug. Administrator access and explicit confirmation are required.
   fields:
     config_entry_id:
       name: Config entry ID
@@ -169,10 +169,9 @@ reset_consumption:
       required: true
       selector:
         boolean:
-
 factory_reset:
   name: Factory reset
-  description: Permanently reset the plug, including settings and PIN.
+  description: Permanently reset the plug, including settings and PIN. Administrator access and explicit confirmation are required.
   fields:
     config_entry_id:
       name: Config entry ID
@@ -183,10 +182,9 @@ factory_reset:
       required: true
       selector:
         boolean:
-
 refresh_all:
   name: Refresh all settings
-  description: Read settings, random mode, timer, serial number and schedules from the plug.
+  description: Read settings, random mode, timer, serial number and schedules from the plug. Requires control permission for the outlet.
   fields:
     config_entry_id:
       name: Config entry ID
