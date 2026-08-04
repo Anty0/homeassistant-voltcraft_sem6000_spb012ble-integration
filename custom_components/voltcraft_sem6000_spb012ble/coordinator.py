@@ -7,7 +7,6 @@ from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import datetime, time as dt_time, timedelta
 from typing import Any
-
 from bleak import BleakClient, BleakGATTCharacteristic
 from bleak.exc import BleakError
 from bleak_retry_connector import establish_connection
@@ -19,7 +18,6 @@ from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH, DeviceIn
 from homeassistant.helpers.device_registry import format_mac
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
-
 from .const import (
     COMMAND_UUID,
     CONF_PIN,
@@ -57,7 +55,6 @@ from .protocol import (
     response_key,
     weekday_mask,
 )
-
 _LOGGER = logging.getLogger(__name__)
 
 _BLE_OPERATION_TIMEOUT = 5.0
@@ -69,7 +66,9 @@ _RECONNECT_COOLDOWN = 5.0
 _MAX_MISSED_UPDATES = 3
 _HISTORY_POLL_INTERVAL = 300.0
 _HISTORY_RESPONSE_TIMEOUT = 15.0
-
+_PIN_CHANGE_SETTLE_DELAY = 3.0
+_PIN_VERIFY_ATTEMPTS = 3
+_PIN_VERIFY_RETRY_DELAY = 2.0
 
 @dataclass(frozen=True)
 class VoltcraftData:
@@ -83,13 +82,11 @@ class VoltcraftData:
     history_24h_wh: tuple[int | None, ...] = ()
     history_30d_wh: tuple[int | None, ...] = ()
     history_12m_wh: tuple[int | None, ...] = ()
-
     device_name: str | None = None
     serial: str | None = None
     vendor: str | None = None
     firmware_version: str | None = None
     hardware_version: str | None = None
-
     night_mode: bool | None = None
     power_protection_enabled: bool | None = None
     power_limit_watts: int | None = None
@@ -103,7 +100,6 @@ class VoltcraftData:
     random_weekday_mask: int | None = None
     random_start: dt_time | None = None
     random_end: dt_time | None = None
-
     timer_action: TimerAction = TimerAction.INACTIVE
     timer_target: datetime | None = None
     timer_original_runtime_seconds: int = 0
@@ -117,10 +113,8 @@ class VoltcraftData:
     att_mtu: int | None = None
     last_connected_at: datetime | None = None
 
-
 class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]):
     """Maintain one authenticated persistent BLE session with a SEM6000."""
-
     def __init__(
         self,
         hass: HomeAssistant,
@@ -144,7 +138,6 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
                 CONF_PIN, config_entry.data.get(CONF_PIN, DEFAULT_PIN)
             )
         )
-
         self.client: BleakClient | None = None
         self._command_char: BleakGATTCharacteristic | None = None
         self._notify_char: BleakGATTCharacteristic | None = None
@@ -157,16 +150,15 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
         self._next_connect_at = 0.0
         self._reconnect_task: asyncio.Task[None] | None = None
         self._extended_refresh_task: asyncio.Task[None] | None = None
-
         self._latest_data = VoltcraftData(device_name=device_name)
         self._connect_lock = asyncio.Lock()
         self._operation_lock = asyncio.Lock()
+        self._credential_lock = asyncio.Lock()
         self._notify_lock = asyncio.Lock()
         self._response_condition = asyncio.Condition()
         self._response_counts: dict[tuple[int, int], int] = {}
         self._last_responses: dict[tuple[int, int], ParsedNotifyPayload] = {}
         self._missed_updates = 0
-
         self._notify_buffer = bytearray()
         self._year_history_wh: tuple[int | None, ...] | None = None
         self._last_history_poll = 0.0
@@ -180,7 +172,6 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
                 bluetooth.BluetoothScanningMode.ACTIVE,
             )
         )
-
     @property
     def pin(self) -> str:
         return self._pin
@@ -196,7 +187,6 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
             manufacturer="Voltcraft",
             model="SEM6000 / SPB012BLE",
         )
-
     @callback
     def _handle_bluetooth_event(self, service_info, change) -> None:
         if self._shutting_down or self._session_ready:
@@ -204,7 +194,6 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
         if time.monotonic() < self._next_connect_at:
             return
         self._schedule_reconnect(0.0)
-
     @callback
     def _handle_disconnected(self, client: BleakClient) -> None:
         if self._shutting_down or self.client is not client:
@@ -214,7 +203,6 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
         self._reset_session_state()
         self._next_connect_at = time.monotonic() + 1.0
         self._schedule_reconnect(1.0)
-
     @callback
     def _schedule_reconnect(self, delay: float) -> None:
         task = self._reconnect_task
@@ -223,7 +211,6 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
         self._reconnect_task = self.hass.async_create_task(
             self._async_delayed_refresh(delay)
         )
-
     async def _async_delayed_refresh(self, delay: float) -> None:
         try:
             if delay:
@@ -236,7 +223,6 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
             _LOGGER.debug("Deferred Voltcraft refresh failed: %s", err)
         finally:
             self._reconnect_task = None
-
     async def async_shutdown(self) -> None:
         if self._shutting_down:
             return
@@ -250,7 +236,6 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
                 with suppress(asyncio.CancelledError):
                     await task
                 setattr(self, task_name, None)
-
         async with self._connect_lock:
             client = self.client
             notify_char = self._notify_char
@@ -269,7 +254,6 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
                 task.cancel()
             self._notification_tasks.clear()
             await self._async_safe_disconnect(client, "shutdown")
-
     def _reset_session_state(self) -> None:
         self._session_ready = False
         self._notify_started = False
@@ -282,7 +266,6 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
         if task is not None and not task.done() and task is not asyncio.current_task():
             task.cancel()
         self._extended_refresh_task = None
-
     def _update_data(self, **changes: Any) -> None:
         self._latest_data = replace(self._latest_data, **changes)
         self.async_set_updated_data(self._latest_data)
@@ -292,7 +275,6 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
             return None
         values = [value for value in self._year_history_wh if value is not None]
         return sum(values) / 1000.0 if values else None
-
     def _command_characteristic(self, client: BleakClient) -> BleakGATTCharacteristic:
         if (
             self.client is not client
@@ -301,7 +283,6 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
         ):
             raise BleakError("Voltcraft BLE session is not ready")
         return self._command_char
-
     async def _publish_response(self, payload: ParsedNotifyPayload) -> None:
         key = response_key(payload)
         if key is None:
@@ -310,7 +291,6 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
         self._response_counts[key] = self._response_counts.get(key, 0) + 1
         async with self._response_condition:
             self._response_condition.notify_all()
-
     async def _write_and_wait(
         self,
         client: BleakClient,
@@ -328,7 +308,6 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
                         lambda: self._response_counts.get(key, 0) != start_count
                     )
             return self._last_responses[key]
-
     async def _send_and_wait(
         self,
         frame: bytes | bytearray,
@@ -339,7 +318,6 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
         return await self._write_and_wait(
             client, self._command_characteristic(client), frame, key, timeout
         )
-
     async def _request_year_history(self, client: BleakClient) -> None:
         self._history_request_in_flight = True
         self._last_history_poll = time.monotonic()
@@ -356,7 +334,6 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
         except (TimeoutError, BleakError):
             self._history_request_in_flight = False
             raise
-
     async def _async_update_data(self) -> VoltcraftData | None:
         client = await self._async_ensure_connected()
         try:
@@ -374,7 +351,6 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
                 await self._async_teardown()
                 raise UpdateFailed(f"No measurement received: {err}") from err
             return self.data
-
         now = time.monotonic()
         if (
             self._history_request_in_flight
@@ -390,11 +366,10 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
             except (TimeoutError, BleakError) as err:
                 _LOGGER.debug("Failed to request consumption history: %s", err)
         return self._latest_data
-
     async def _handle_notify(
         self, sender: BleakGATTCharacteristic, data: bytearray
     ) -> None:
-        _LOGGER.debug("Received notification fragment: %s", data.hex())
+        _LOGGER.debug("Received BLE notification fragment (%s bytes)", len(data))
         async with self._notify_lock:
             self._notify_buffer.extend(data)
             while True:
@@ -404,8 +379,8 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
                     next_frame = self._notify_buffer.find(0x0F, 1)
                     if next_frame == -1:
                         _LOGGER.debug(
-                            "Dropping stray notification data: %s",
-                            self._notify_buffer.hex(),
+                            "Dropping stray BLE notification data (%s bytes)",
+                            len(self._notify_buffer),
                         )
                         self._notify_buffer.clear()
                         return
@@ -420,12 +395,11 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
                     payload = parse_notify_payload(frame)
                 except ValueError as err:
                     self._history_request_in_flight = False
-                    _LOGGER.warning("Invalid notification %s: %s", frame.hex(), err)
+                    _LOGGER.warning("Invalid BLE notification (%s bytes): %s", len(frame), err)
                     continue
                 if payload is None:
-                    _LOGGER.warning("Unknown payload received: %s", frame.hex())
+                    _LOGGER.warning("Unknown BLE notification (%s bytes)", len(frame))
                     continue
-
                 if isinstance(payload, MeasureNotifyPayload):
                     power = payload.power / 1000.0
                     voltage = float(payload.voltage)
@@ -493,9 +467,7 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
                 elif isinstance(payload, AckNotifyPayload):
                     if payload.command == Command.SWITCH and payload.was_successful:
                         self.hass.async_create_task(self.async_request_refresh())
-
                 await self._publish_response(payload)
-
     def _install_passive_notification_listener(
         self, client: BleakClient, notify_char: BleakGATTCharacteristic
     ) -> bool:
@@ -507,20 +479,17 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
         char_path = char_obj[0]
         if not isinstance(char_path, str):
             return False
-
         def _dispatch(data: bytearray) -> None:
             task = self.hass.async_create_task(
                 self._handle_notify(notify_char, bytearray(data))
             )
             self._notification_tasks.add(task)
             task.add_done_callback(self._notification_tasks.discard)
-
         callbacks[char_path] = _dispatch
         self._passive_notify_backend = backend
         self._passive_notify_path = char_path
         _LOGGER.debug("Using passive BlueZ notification listener for FFF4")
         return True
-
     def _remove_passive_notification_listener(self) -> None:
         backend = self._passive_notify_backend
         char_path = self._passive_notify_path
@@ -531,7 +500,6 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
         callbacks = getattr(backend, "_notification_callbacks", None)
         if isinstance(callbacks, dict):
             callbacks.pop(char_path, None)
-
     async def _async_app_cccd_handshake(
         self, client: BleakClient, notify_char: BleakGATTCharacteristic
     ) -> bool:
@@ -542,7 +510,6 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
         with a request write, while retaining the passive Value-change listener.
         Failure is non-fatal.
         """
-
         descriptor = next(
             (
                 item
@@ -560,7 +527,6 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
             from bleak.backends.bluezdbus import defs
             from bleak.backends.bluezdbus.utils import assert_gatt_reply
             from dbus_fast.message import Message
-
             reply = await bus.call(
                 Message(
                     destination=defs.BLUEZ_SERVICE,
@@ -580,23 +546,24 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
         except Exception as err:
             _LOGGER.debug("Official-app CCCD handshake was not available: %s", err)
             return False
-
     async def _async_login(
         self,
         client: BleakClient,
         command_char: BleakGATTCharacteristic,
         timeout: float = _LOGIN_TIMEOUT,
+        *,
+        pin: str | None = None,
     ) -> None:
+        login_pin = self._pin if pin is None else normalize_pin(pin)
         response = await self._write_and_wait(
             client,
             command_char,
-            Commands.login(self._pin),
+            Commands.login(login_pin),
             (Command.LOGIN, PinOperation.AUTHORIZE),
             timeout,
         )
         if not isinstance(response, LoginNotifyPayload) or not response.was_successful:
-            raise BleakError(f"Voltcraft login with configured PIN was rejected")
-
+            raise BleakError("Voltcraft login with configured PIN was rejected")
     async def _async_read_device_identity(self, client: BleakClient) -> None:
         try:
             name_char = client.services.get_characteristic(DEVICE_NAME_UUID)
@@ -610,7 +577,6 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
                     self._update_data(device_name=name)
         except Exception as err:
             _LOGGER.debug("Reading device name failed: %s", err)
-
         try:
             info_char = client.services.get_characteristic(DEVICE_INFO_UUID)
             if info_char is not None:
@@ -625,10 +591,9 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
                         hardware_version=f"{raw_info[13]}.{raw_info[14]}",
                     )
                 else:
-                    _LOGGER.debug("Unexpected FFF1 device-info payload: %s", raw_info.hex())
+                    _LOGGER.debug("Unexpected FFF1 device-info payload (%s bytes)", len(raw_info))
         except Exception as err:
             _LOGGER.debug("Reading firmware/hardware information failed: %s", err)
-
     async def _async_acquire_mtu(self, client: BleakClient) -> int | None:
         """Negotiate ATT MTU on BlueZ, mirroring the official app sequence.
 
@@ -636,12 +601,10 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
         and non-fatal; the integration continues with the default MTU if BlueZ or
         the adapter does not support it.
         """
-
         backend = getattr(client, "_backend", None)
         acquire_mtu = getattr(backend, "_acquire_mtu", None)
         if not callable(acquire_mtu):
             return None
-
         try:
             async with self._operation_lock:
                 async with asyncio.timeout(3.0):
@@ -654,7 +617,6 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
         except Exception as err:
             _LOGGER.debug("Voltcraft ATT MTU negotiation was not available: %s", err)
         return None
-
     async def _async_core_initialization(
         self, client: BleakClient, command_char: BleakGATTCharacteristic
     ) -> tuple[bool, bool]:
@@ -663,12 +625,10 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
         settings_ok = False
         random_ok = False
         finalize_ok = False
-
         # Match the official app order: login, read FFF1, negotiate MTU, then
         # synchronize the device clock. The MTU step is best-effort.
         await self._async_read_device_identity(client)
         await self._async_acquire_mtu(client)
-
         try:
             await self._write_and_wait(
                 client,
@@ -680,7 +640,6 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
             time_ok = True
         except Exception as err:
             _LOGGER.debug("Device time synchronization failed: %s", err)
-
         try:
             await self._write_and_wait(
                 client,
@@ -692,7 +651,6 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
             settings_ok = True
         except Exception as err:
             _LOGGER.debug("Initial settings request failed: %s", err)
-
         # The app takes a first measurement, reads the yearly history and then
         # repeats settings before querying random mode.  Reproducing this order
         # also gives the device enough time to leave its connection animation.
@@ -706,7 +664,6 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
             )
         except Exception as err:
             _LOGGER.debug("Initial measurement request failed: %s", err)
-
         try:
             await self._write_and_wait(
                 client,
@@ -717,7 +674,6 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
             )
         except Exception as err:
             _LOGGER.debug("Initial yearly-history request failed: %s", err)
-
         try:
             await self._write_and_wait(
                 client,
@@ -728,7 +684,6 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
             )
         except Exception as err:
             _LOGGER.debug("Second app-style settings request failed: %s", err)
-
         try:
             await self._write_and_wait(
                 client,
@@ -740,7 +695,6 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
             random_ok = True
         except Exception as err:
             _LOGGER.debug("Initial random-mode request failed: %s", err)
-
         # This exact zero-argument probe is the final command in the captured
         # Android app initialization.  Its semantics are undocumented, but the
         # request is read-only and is the strongest remaining candidate for
@@ -756,9 +710,7 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
             finalize_ok = not isinstance(response, AckNotifyPayload) or response.was_successful
         except Exception as err:
             _LOGGER.debug("Official-app 0x07 finalization probe failed: %s", err)
-
         return time_ok and settings_ok and random_ok, finalize_ok
-
     async def _async_post_connect_sequence(self) -> None:
         try:
             await asyncio.sleep(0.25)
@@ -785,15 +737,24 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
             raise
         except Exception as err:
             _LOGGER.debug("Post-connect SEM6000 initialization failed: %s", err)
-
-    async def _async_ensure_connected(self) -> BleakClient:
+    async def _async_ensure_connected(self, *, pin: str | None = None) -> BleakClient:
+        login_pin = self._pin if pin is None else normalize_pin(pin)
         client = self.client
-        if client is not None and client.is_connected and self._session_ready:
+        if (
+            pin is None
+            and client is not None
+            and client.is_connected
+            and self._session_ready
+        ):
             return client
-
         async with self._connect_lock:
             client = self.client
-            if client is not None and client.is_connected and self._session_ready:
+            if (
+                pin is None
+                and client is not None
+                and client.is_connected
+                and self._session_ready
+            ):
                 return client
             now = time.monotonic()
             if now < self._next_connect_at:
@@ -805,7 +766,6 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
                 self.client = None
                 self._reset_session_state()
                 await self._async_safe_disconnect(client, "replace stale client")
-
             if not bluetooth.async_address_present(
                 self.hass, self._mac_address, connectable=True
             ):
@@ -821,7 +781,6 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
                     f"No connectable Bluetooth path for {self._mac_address}",
                     retry_after=5.0,
                 )
-
             new_client: BleakClient | None = None
             stage = "transport and service discovery"
             try:
@@ -841,7 +800,6 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
                     raise BleakError("Required FFF3/FFF4 characteristics were not discovered")
                 self._command_char = command_char
                 self._notify_char = notify_char
-
                 passive = self._install_passive_notification_listener(
                     new_client, notify_char
                 )
@@ -852,11 +810,12 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
                 if passive:
                     stage = "passive notification login"
                     try:
-                        await self._async_login(new_client, command_char, 2.0)
+                        await self._async_login(
+                            new_client, command_char, 2.0, pin=login_pin
+                        )
                     except TimeoutError:
                         self._remove_passive_notification_listener()
                         passive = False
-
                 if not passive:
                     stage = "notification subscription"
                     async with asyncio.timeout(_NOTIFY_TIMEOUT):
@@ -867,14 +826,12 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
                         )
                     self._notify_started = True
                     stage = "session login"
-                    await self._async_login(new_client, command_char)
-
+                    await self._async_login(new_client, command_char, pin=login_pin)
                 self._session_ready = True
                 self._missed_updates = 0
                 self._history_request_in_flight = False
                 self._last_history_poll = 0.0
                 self._next_connect_at = 0.0
-
                 self._update_data(
                     session_transport=(
                         "bluez_passive_app_handshake"
@@ -908,7 +865,6 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
                     f"Failed to connect to {self._mac_address} during {stage}: {err}",
                     retry_after=_RECONNECT_COOLDOWN,
                 ) from err
-
     async def _async_teardown(self) -> None:
         async with self._connect_lock:
             client = self.client
@@ -917,13 +873,85 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
             if client is not None:
                 await self._async_safe_disconnect(client, "teardown")
             self._next_connect_at = max(self._next_connect_at, time.monotonic() + 2.0)
-
     async def _async_safe_disconnect(self, client: BleakClient, context: str) -> None:
         try:
             async with asyncio.timeout(_BLE_OPERATION_TIMEOUT):
                 await client.disconnect()
         except (TimeoutError, BleakError) as err:
             _LOGGER.debug("Error disconnecting client (%s): %s", context, err)
+    async def _async_cancel_pending_reconnect(self) -> None:
+        task = self._reconnect_task
+        if task is None or task.done() or task is asyncio.current_task():
+            return
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        if self._reconnect_task is task:
+            self._reconnect_task = None
+
+    async def _async_verify_pin(
+        self, pin: str, *, settle_delay: float = 0.0
+    ) -> bool:
+        """Verify a PIN through a fresh BLE connection and login."""
+        candidate = normalize_pin(pin)
+        await self._async_cancel_pending_reconnect()
+        await self._async_teardown()
+        if settle_delay > 0:
+            await asyncio.sleep(settle_delay)
+
+        last_error: Exception | None = None
+        for attempt in range(_PIN_VERIFY_ATTEMPTS):
+            self._next_connect_at = 0.0
+            try:
+                await self._async_ensure_connected(pin=candidate)
+                return True
+            except (TimeoutError, BleakError, UpdateFailed) as err:
+                last_error = err
+                await self._async_teardown()
+                if attempt + 1 < _PIN_VERIFY_ATTEMPTS:
+                    await asyncio.sleep(_PIN_VERIFY_RETRY_DELAY)
+
+        _LOGGER.warning(
+            "Voltcraft PIN verification failed after %s attempt(s): %s",
+            _PIN_VERIFY_ATTEMPTS,
+            last_error or "unknown error",
+        )
+        return False
+
+    def _store_verified_pin(self, pin: str) -> None:
+        verified_pin = normalize_pin(pin)
+        self._pin = verified_pin
+        self.hass.config_entries.async_update_entry(
+            self.config_entry,
+            options={**self.config_entry.options, CONF_PIN: verified_pin},
+        )
+
+    async def _async_verify_and_store_pin(
+        self,
+        *,
+        new_pin: str,
+        previous_pin: str,
+        operation_name: str,
+    ) -> None:
+        """Persist a changed PIN only after a fresh login proves it works."""
+        if await self._async_verify_pin(
+            new_pin, settle_delay=_PIN_CHANGE_SETTLE_DELAY
+        ):
+            self._store_verified_pin(new_pin)
+            return
+
+        if await self._async_verify_pin(previous_pin):
+            raise HomeAssistantError(
+                f"{operation_name} was acknowledged, but the device rejected the new PIN. "
+                "The previous PIN remains stored."
+            )
+
+        await self._async_teardown()
+        raise HomeAssistantError(
+            f"{operation_name} was acknowledged, but neither the new nor the previous PIN "
+            "could be verified. The stored PIN was not changed. Enter the working PIN in "
+            "the integration options."
+        )
 
     async def _user_command(
         self,
@@ -942,7 +970,6 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
             await self._async_teardown()
             detail = str(err) or type(err).__name__
             raise HomeAssistantError(f"Voltcraft command failed: {detail}") from err
-
     async def async_send_switch_command(self, mode: SwitchModes) -> None:
         await self._user_command(mode.build_payload(), (Command.SWITCH, 0))
         await self.async_request_refresh()
@@ -952,7 +979,6 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
             Commands.sync_time(dt_util.now().replace(tzinfo=None)),
             (Command.SET_TIME, 0),
         )
-
     async def async_refresh_settings(self) -> None:
         await self._send_and_wait(
             Commands.request_settings(), (Command.GET_SETTINGS, 0)
@@ -964,13 +990,11 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
             (Command.SETTINGS_CONTROL, 0),
         )
         await self.async_refresh_settings()
-
     async def async_set_power_limit(self, watts: int) -> None:
         await self._user_command(
             Commands.set_power_limit(watts), (Command.SET_POWER_LIMIT, 0)
         )
         await self.async_refresh_settings()
-
     async def async_set_power_protection(self, enabled: bool) -> None:
         await self._user_command(
             Commands.set_power_protection(enabled),
@@ -981,14 +1005,12 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
         # requested state locally and preserve it across normal refreshes.
         self._update_data(power_protection_enabled=enabled)
         await self.async_refresh_settings()
-
     async def async_set_prices(self, normal: float, reduced: float) -> None:
         await self._user_command(
             Commands.set_prices(round(normal * 100), round(reduced * 100)),
             (Command.SETTINGS_CONTROL, 0),
         )
         await self.async_refresh_settings()
-
     async def async_set_reduced_period(
         self, enabled: bool, start: dt_time, end: dt_time
     ) -> None:
@@ -997,7 +1019,6 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
             (Command.SETTINGS_CONTROL, 0),
         )
         await self.async_refresh_settings()
-
 
     async def async_refresh_history(self) -> None:
         for kind in (HistoryKind.DAY, HistoryKind.MONTH, HistoryKind.YEAR):
@@ -1013,7 +1034,6 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
                 ),
                 _HISTORY_RESPONSE_TIMEOUT,
             )
-
     async def async_refresh_random(self) -> None:
         await self._send_and_wait(Commands.request_random(), (Command.GET_RANDOM, 0))
 
@@ -1025,7 +1045,6 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
             (Command.SET_RANDOM, 0),
         )
         await self.async_refresh_random()
-
     async def async_refresh_timer(self) -> None:
         await self._send_and_wait(Commands.request_timer(), (Command.GET_TIMER, 0))
 
@@ -1035,19 +1054,16 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
             Commands.set_timer(action, target), (Command.SET_TIMER, 0)
         )
         await self.async_refresh_timer()
-
     async def async_set_timer_delay(self, turn_on: bool, seconds: int) -> None:
         if seconds < 1:
             raise ValueError("Timer delay must be at least one second")
         target = dt_util.now().replace(tzinfo=None) + timedelta(seconds=seconds)
         await self.async_set_timer(turn_on, target)
-
     async def async_stop_timer(self) -> None:
         await self._user_command(
             Commands.set_timer(TimerAction.INACTIVE, None), (Command.SET_TIMER, 0)
         )
         await self.async_refresh_timer()
-
     async def async_refresh_schedules(self) -> None:
         # The response count is the number of entries in that page, not a
         # reliable global total.  Read all three four-entry pages so all 12
@@ -1062,7 +1078,6 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
             entries.extend(response.entries)
         unique = {entry.slot_id: entry for entry in entries}
         self._update_data(schedules=tuple(unique[key] for key in sorted(unique)))
-
     def _hardware_major(self) -> int | None:
         version = self._latest_data.hardware_version
         if not version:
@@ -1071,7 +1086,6 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
             return int(str(version).split(".", 1)[0])
         except (TypeError, ValueError):
             return None
-
     def schedule_user_slot(self, wire_slot: int) -> int:
         """Translate a device scheduler ID to the 1-based UI slot."""
         major = self._hardware_major()
@@ -1081,26 +1095,22 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
             return int(wire_slot) - 8
         # Infer the generation from the wire ID until FFF1 has been read.
         return int(wire_slot) + 1 if int(wire_slot) < 9 else int(wire_slot) - 8
-
     def _wire_slot(self, user_slot: int) -> int:
         """Translate a 1-based UI slot to the generation-specific wire ID."""
         slot = int(user_slot)
         if not 1 <= slot <= 12:
             raise ValueError("Schedule slot must be between 1 and 12")
-
         # Prefer the exact raw ID already returned by this device.  This avoids
         # assumptions when editing/removing an existing schedule.
         for entry in self._latest_data.schedules:
             if self.schedule_user_slot(entry.slot_id) == slot:
                 return entry.slot_id
-
         major = self._hardware_major()
         if major is not None and major <= 2:
             return slot + 8
         # Hardware version 3 uses zero-based IDs.  It is also the safe default
         # for this device generation while identity data is still loading.
         return slot - 1
-
     async def async_set_schedule(
         self,
         *,
@@ -1125,7 +1135,6 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
             5.0,
         )
         await self.async_refresh_schedules()
-
     async def async_remove_schedule(self, slot: int) -> None:
         await self._user_command(
             Commands.set_schedule(
@@ -1140,7 +1149,6 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
             5.0,
         )
         await self.async_refresh_schedules()
-
     async def async_set_device_name(self, name: str) -> None:
         await self._user_command(Commands.set_name(name), (Command.SET_NAME, 0))
         self._device_name = name
@@ -1149,36 +1157,46 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
     async def async_refresh_device_identity(self) -> None:
         client = await self._async_ensure_connected()
         await self._async_read_device_identity(client)
-
     async def async_refresh_serial(self) -> None:
         await self._send_and_wait(Commands.request_serial(), (Command.GET_SERIAL, 0), 5.0)
-
     async def async_change_pin(self, new_pin: str) -> None:
         new_pin = normalize_pin(new_pin)
-        response = await self._user_command(
-            Commands.change_pin(self._pin, new_pin),
-            (Command.LOGIN, PinOperation.CHANGE),
-        )
-        if not isinstance(response, LoginNotifyPayload) or not response.was_successful:
-            raise HomeAssistantError("PIN change was rejected")
-        self._pin = new_pin
-        self.hass.config_entries.async_update_entry(
-            self.config_entry,
-            options={**self.config_entry.options, CONF_PIN: new_pin},
-        )
-
+        async with self._credential_lock:
+            previous_pin = self._pin
+            if new_pin == previous_pin:
+                return
+            response = await self._user_command(
+                Commands.change_pin(previous_pin, new_pin),
+                (Command.LOGIN, PinOperation.CHANGE),
+            )
+            if (
+                not isinstance(response, LoginNotifyPayload)
+                or response.operation != PinOperation.CHANGE
+                or not response.was_successful
+            ):
+                raise HomeAssistantError("PIN change was rejected")
+            await self._async_verify_and_store_pin(
+                new_pin=new_pin,
+                previous_pin=previous_pin,
+                operation_name="PIN change",
+            )
     async def async_reset_pin(self) -> None:
-        response = await self._user_command(
-            Commands.reset_pin(), (Command.LOGIN, PinOperation.RESET)
-        )
-        if not isinstance(response, LoginNotifyPayload) or not response.was_successful:
-            raise HomeAssistantError("PIN reset was rejected")
-        self._pin = DEFAULT_PIN
-        self.hass.config_entries.async_update_entry(
-            self.config_entry,
-            options={**self.config_entry.options, CONF_PIN: DEFAULT_PIN},
-        )
-
+        async with self._credential_lock:
+            previous_pin = self._pin
+            response = await self._user_command(
+                Commands.reset_pin(), (Command.LOGIN, PinOperation.RESET)
+            )
+            if (
+                not isinstance(response, LoginNotifyPayload)
+                or response.operation != PinOperation.RESET
+                or not response.was_successful
+            ):
+                raise HomeAssistantError("PIN reset was rejected")
+            await self._async_verify_and_store_pin(
+                new_pin=DEFAULT_PIN,
+                previous_pin=previous_pin,
+                operation_name="PIN reset",
+            )
     async def async_reset_consumption(self) -> None:
         await self._user_command(
             Commands.reset_consumption(),
@@ -1188,20 +1206,19 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
         self._year_history_wh = None
         self._last_history_poll = 0.0
         self._update_data(consumed_energy=0.0)
-
     async def async_factory_reset(self) -> None:
-        await self._user_command(
-            Commands.factory_reset(),
-            (Command.SETTINGS_CONTROL, 0),
-            5.0,
-        )
-        self._pin = DEFAULT_PIN
-        await self._async_teardown()
-        self.hass.config_entries.async_update_entry(
-            self.config_entry,
-            options={**self.config_entry.options, CONF_PIN: DEFAULT_PIN},
-        )
-
+        async with self._credential_lock:
+            previous_pin = self._pin
+            await self._user_command(
+                Commands.factory_reset(),
+                (Command.SETTINGS_CONTROL, 0),
+                5.0,
+            )
+            await self._async_verify_and_store_pin(
+                new_pin=DEFAULT_PIN,
+                previous_pin=previous_pin,
+                operation_name="Factory reset",
+            )
     async def async_refresh_all(self, *, include_initialization: bool = True) -> None:
         client = await self._async_ensure_connected()
         if include_initialization:
@@ -1213,7 +1230,6 @@ class VoltcraftDataUpdateCoordinator(DataUpdateCoordinator[VoltcraftData | None]
                 app_initialization_complete=initialized,
                 app_finalize_succeeded=finalized,
             )
-
         operations = (
             self.async_refresh_device_identity,
             self.async_refresh_history,
