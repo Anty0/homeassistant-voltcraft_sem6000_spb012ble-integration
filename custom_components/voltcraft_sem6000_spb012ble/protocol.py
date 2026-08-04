@@ -645,12 +645,12 @@ def parse_notify_payload(
     if command == Command.LOGIN:
         if not args:
             raise ValueError("PIN response has no status")
-        operation = (
+        pin_operation = (
             PinOperation(args[1])
             if len(args) >= 2 and args[1] in PinOperation._value2member_map_
             else PinOperation.AUTHORIZE
         )
-        return LoginNotifyPayload(operation, args[0] == 0)
+        return LoginNotifyPayload(pin_operation, args[0] == 0)
 
     if command == Command.GET_SETTINGS:
         if len(args) < 11:
@@ -749,14 +749,14 @@ def parse_notify_payload(
 
     # Generic acknowledgements. 0x0f embeds its operation as the first arg;
     # 0x17 is handled above because its layout is different.
-    operation = (
+    ack_operation = (
         args[0] if command == Command.SETTINGS_CONTROL and args else subcommand
     )
     status_index = (
         1 if command == Command.SETTINGS_CONTROL and len(args) >= 2 else 0
     )
     success = not args or args[status_index] == 0
-    return AckNotifyPayload(command, operation, success)
+    return AckNotifyPayload(command, ack_operation, success)
 
 
 def response_key(payload: ParsedNotifyPayload) -> tuple[int, int] | None:
