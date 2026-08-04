@@ -48,6 +48,8 @@ CONF_END = "end"
 CONF_NEW_PIN = "new_pin"
 CONF_CONFIRM = "confirm"
 
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
 
 def _local_naive(value: datetime) -> datetime:
     if value.tzinfo is None:

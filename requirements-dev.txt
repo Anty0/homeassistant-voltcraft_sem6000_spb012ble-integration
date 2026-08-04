@@ -1,3 +1,3 @@
-# Exact development dependencies for the beta 6 validation workflow.
+# Exact development dependencies for repository validation.
 ruff==0.14.6
 mypy==1.18.2
