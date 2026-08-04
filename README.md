@@ -140,8 +140,10 @@ Home Assistant uses to log in. The stored PIN is deliberately not returned to th
 browser. Leaving the field empty keeps the current value.
 
 To change the PIN on the plug itself, use the administrator-only **Change PIN**
-action and enable its confirmation field. After the device acknowledges the
-change, the integration updates its stored PIN and reloads the config entry.
+action and enable its confirmation field. After the device acknowledges the change,
+the integration disconnects and verifies the new PIN through a fresh BLE login. 
+The new PIN is stored and the config entry is reloaded only after that login succeeds. 
+If verification fails, the integration tests the previous PIN and leaves the stored value unchanged.
 **Reset PIN**, consumption reset and factory reset are also restricted to Home
 Assistant administrators and require explicit confirmation.
 
